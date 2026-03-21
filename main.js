@@ -120,18 +120,14 @@ function scheduleAutonomousTasks() {
     const context = collectContext();
     const searchPrompt = config.searchPrompt || '最新の技術トレンドを調査してください';
 
-    // Build task description from search prompt + context
-    const taskDesc = `## 調査指示\n${searchPrompt}\n\n` +
-      `## 現在の知識状態\n- 蓄積知識数: ${context.knowledgeCount}\n- 解析済みファイル数: ${context.fileCount}\n- 直近の活動: ${context.recentActivity}\n\n` +
-      `ウェブ検索（search_web）で最新の情報を収集し、関連ページ（fetch_page）の内容を確認して、` +
-      `重要な発見をメモ（save_note）に残してください。最後にdoneで結果をまとめてください。`;
+    // Build task description — keep it short and direct for LLM
+    const taskDesc = `${searchPrompt}\n\nsearch_webで検索し、見つかったページをfetch_pageで読んでください。`;
 
     log('info', `Agent research starting: ${searchPrompt.slice(0, 60)}`);
 
     const result = await runAgentLoop(url, model, taskDesc, ROOT, {
       workLogDir,
-      onLog: log,
-      systemContext: `検索プロンプト: ${searchPrompt}\n知識数: ${context.knowledgeCount}\nファイル数: ${context.fileCount}`
+      onLog: log
     });
 
     // Always save research results to knowledge DB (summary + any insights)
@@ -161,12 +157,7 @@ function scheduleAutonomousTasks() {
       ? `対象フォルダ: ${folders.join(', ')}`
       : 'プロジェクトのルートディレクトリ';
 
-    const taskDesc = `## コードベース解析\n${targetDesc}\n\n` +
-      `1. まず list_files でプロジェクト構造を確認してください\n` +
-      `2. 重要なファイルを read_file または analyze_code で読んでください\n` +
-      `3. git_log で最近の変更を確認してください\n` +
-      `4. コードの品質、構造、改善点を分析してください\n` +
-      `5. 発見をメモ（save_note）に残し、done で結果をまとめてください`;
+    const taskDesc = `コードベースを解析してください。${targetDesc}\n\nlist_filesで構造を確認し、analyze_codeやread_fileで重要なファイルを読んでください。`;
 
     log('info', 'Agent code analysis starting');
 
