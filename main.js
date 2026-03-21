@@ -12,7 +12,7 @@ const {
   generateModule, chat, getNewKnowledge
 } = require('./core/evolution');
 const { doubleCheck } = require('./explorers/verifier');
-const { extractInsights, setThinkingCallback } = require('./explorers/crawler');
+const { setThinkingCallback } = require('./explorers/crawler');
 const { analyzeFolder, analyzeFolderWithLLM, scanDirectory } = require('./lib/analyzer');
 const { runAgentLoop } = require('./core/agent-loop');
 const { loadConfig } = require('./lib/configurator');
@@ -120,14 +120,12 @@ function scheduleAutonomousTasks() {
     const context = collectContext();
     const searchPrompt = config.searchPrompt || '最新の技術トレンドを調査してください';
 
-    // Build task description — keep it short and direct for LLM
-    const taskDesc = `${searchPrompt}\n\nsearch_webで検索し、見つかったページをfetch_pageで読んでください。`;
-
     log('info', `Agent research starting: ${searchPrompt.slice(0, 60)}`);
 
-    const result = await runAgentLoop(url, model, taskDesc, ROOT, {
+    const result = await runAgentLoop(url, model, searchPrompt, ROOT, {
       workLogDir,
-      onLog: log
+      onLog: log,
+      mode: 'research'
     });
 
     // Always save research results to knowledge DB (summary + any insights)
@@ -153,17 +151,13 @@ function scheduleAutonomousTasks() {
 
   // Phase 2: Agent-driven code analysis — read actual files, analyze, summarize
   taskManager.enqueue(createTask('agent:analyze', async () => {
-    const targetDesc = folders.length > 0
-      ? `対象フォルダ: ${folders.join(', ')}`
-      : 'プロジェクトのルートディレクトリ';
-
-    const taskDesc = `コードベースを解析してください。${targetDesc}\n\nlist_filesで構造を確認し、analyze_codeやread_fileで重要なファイルを読んでください。`;
-
     log('info', 'Agent code analysis starting');
 
-    const result = await runAgentLoop(url, model, taskDesc, ROOT, {
+    const result = await runAgentLoop(url, model, 'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
       workLogDir,
-      onLog: log
+      onLog: log,
+      mode: 'analyze',
+      targetFolders: folders
     });
 
     const hasData = (result.insights && result.insights.length > 0) ||
@@ -189,8 +183,11 @@ function scheduleAutonomousTasks() {
       return { skipped: true };
     }
 
-    // Pick the most recent research entry with insights
-    const researchEntries = knowledge.filter(k => k.insights || k.topic);
+    // Pick the most recent research entry with actual insights or summary
+    const researchEntries = knowledge.filter(k =>
+      (Array.isArray(k.insights) && k.insights.length > 0) ||
+      (k.summary && k.summary.length > 20)
+    );
     if (researchEntries.length === 0) return { skipped: true };
 
     const entry = researchEntries[researchEntries.length - 1];
