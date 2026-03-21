@@ -193,7 +193,8 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
         saveKnowledge(path.resolve(ROOT, 'brain', 'research'), 'research', {
           topic: parsed.searchQuery.slice(0, 50),
           insights: result.insights || [],
-          summary: result.summary || ''
+          summary: result.summary || '',
+          sources: result.sources || []
         });
         log('info', `Supplementary research saved: ${(result.insights || []).length} insights for user query`);
       }
@@ -351,7 +352,8 @@ function scheduleAutonomousTasks() {
           saveKnowledge(researchDbPath, 'research', {
             topic: topic || searchPrompt.slice(0, 50),
             insights: result.insights || [],
-            summary: result.summary || ''
+            summary: result.summary || '',
+            sources: result.sources || []
           });
           log('info', `Research saved: ${(result.insights || []).length} insights`);
         }
@@ -418,7 +420,8 @@ function scheduleAutonomousTasks() {
           saveKnowledge(analysisDbPath, 'analysis', {
             topic: 'コードベース解析',
             insights: result.insights || [],
-            summary: result.summary || ''
+            summary: result.summary || '',
+            sources: result.sources || []
           });
           log('info', `Analysis saved: ${(result.insights || []).length} findings`);
         }

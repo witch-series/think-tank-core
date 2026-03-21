@@ -88,6 +88,9 @@
     .k-entry .k-category { color: #bd93f9; font-size: 11px; float: right; }
     .k-entry .k-time { color: #6272a4; font-size: 11px; }
     .k-entry .k-body { color: #ccc; margin-top: 6px; white-space: pre-wrap; word-break: break-all; }
+    .k-entry .k-sources { margin-top: 6px; font-size: 11px; }
+    .k-entry .k-sources a { color: #6272a4; text-decoration: none; word-break: break-all; }
+    .k-entry .k-sources a:hover { color: #8be9fd; text-decoration: underline; }
 
     /* Search bar */
     .search-bar { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #333; flex-shrink: 0; }
@@ -139,6 +142,11 @@
 
     <!-- Summary (insights/summaries from research) -->
     <div id="tab-summary" class="tab-content">
+      <div class="search-bar">
+        <input type="text" id="summary-search" placeholder="キーワードで検索..." />
+        <button id="summary-search-btn">Search</button>
+        <span class="result-count" id="summary-count"></span>
+      </div>
       <div class="k-scroll" id="summary-list"><div class="empty">Loading...</div></div>
     </div>
 
@@ -354,42 +362,76 @@
     });
 
     // --- Summary (insights/summaries) ---
+    let allSummaryData = [];
+
     async function fetchSummary() {
       try {
         const res = await fetch(apiUrl + '/knowledge?count=50');
-        const data = await res.json();
-        const container = document.getElementById('summary-list');
-        if (data.length === 0) {
-          container.innerHTML = '<div class="empty">No entries yet</div>';
-          return;
-        }
-        container.innerHTML = data.map(function(e) {
-          const time = e.timestamp ? e.timestamp.replace('T', ' ').split('.')[0] : '';
-          const topic = e.topic || e._category || 'unknown';
-
-          // Build body: prefer summary text, then insights, then raw
-          let body = '';
-          if (e.summary && e.summary.length > 10) {
-            body = e.summary;
-          } else if (e.insights && e.insights.length > 0) {
-            body = JSON.stringify(e.insights, null, 2);
-          } else if (e.analysis) {
-            body = JSON.stringify(e.analysis, null, 2).slice(0, 500);
-          } else {
-            body = JSON.stringify(e, null, 2).slice(0, 300);
-          }
-
-          return '<div class="k-entry">' +
-            '<span class="k-category">' + esc(e._category || '') + '</span>' +
-            '<div class="k-topic">' + esc(topic) + '</div>' +
-            '<div class="k-time">' + esc(time) + '</div>' +
-            '<div class="k-body">' + renderMd(body) + '</div>' +
-            '</div>';
-        }).join('');
+        allSummaryData = await res.json();
+        var query = document.getElementById('summary-search').value.trim();
+        if (query) { searchSummary(); } else { renderSummary(allSummaryData); }
       } catch {
         document.getElementById('summary-list').innerHTML = '<div class="empty" style="color:#ff5555">Failed to load</div>';
       }
     }
+
+    function searchSummary() {
+      var query = document.getElementById('summary-search').value.trim().toLowerCase();
+      if (!query) { renderSummary(allSummaryData); return; }
+      var keywords = query.split(/\s+/);
+      var filtered = allSummaryData.filter(function(e) {
+        var text = JSON.stringify(e).toLowerCase();
+        return keywords.every(function(kw) { return text.indexOf(kw) !== -1; });
+      });
+      renderSummary(filtered);
+    }
+
+    function renderSourceLinks(sources) {
+      if (!Array.isArray(sources) || sources.length === 0) return '';
+      return '<div class="k-sources">Sources: ' +
+        sources.map(function(url) {
+          return '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(url.length > 60 ? url.slice(0, 60) + '...' : url) + '</a>';
+        }).join(' | ') + '</div>';
+    }
+
+    function renderSummary(data) {
+      var container = document.getElementById('summary-list');
+      var countEl = document.getElementById('summary-count');
+      countEl.textContent = data.length + ' entries';
+
+      if (data.length === 0) {
+        container.innerHTML = '<div class="empty">No matching entries</div>';
+        return;
+      }
+      container.innerHTML = data.map(function(e) {
+        var time = e.timestamp ? e.timestamp.replace('T', ' ').split('.')[0] : '';
+        var topic = e.topic || e._category || 'unknown';
+
+        var body = '';
+        if (e.summary && e.summary.length > 10) {
+          body = e.summary;
+        } else if (e.insights && e.insights.length > 0) {
+          body = JSON.stringify(e.insights, null, 2);
+        } else if (e.analysis) {
+          body = JSON.stringify(e.analysis, null, 2).slice(0, 500);
+        } else {
+          body = JSON.stringify(e, null, 2).slice(0, 300);
+        }
+
+        return '<div class="k-entry">' +
+          '<span class="k-category">' + esc(e._category || '') + '</span>' +
+          '<div class="k-topic">' + esc(topic) + '</div>' +
+          '<div class="k-time">' + esc(time) + '</div>' +
+          '<div class="k-body">' + renderMd(body) + '</div>' +
+          renderSourceLinks(e.sources) +
+          '</div>';
+      }).join('');
+    }
+
+    document.getElementById('summary-search-btn').addEventListener('click', searchSummary);
+    document.getElementById('summary-search').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') searchSummary();
+    });
 
     // --- Knowledge DB (searchable) ---
     let allKnowledgeData = [];
@@ -451,6 +493,7 @@
           '<div class="k-topic">' + esc(topic) + '</div>' +
           '<div class="k-time">' + esc(time) + '</div>' +
           '<div class="k-body">' + esc(body) + '</div>' +
+          renderSourceLinks(e.sources) +
           '</div>';
       }).join('');
     }

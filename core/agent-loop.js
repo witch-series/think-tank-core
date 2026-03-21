@@ -611,9 +611,17 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   );
   onLog('info', `Summary complete: ${insights.length} insights`);
 
+  // Extract source URLs from collected data
+  const sourceUrls = [];
+  for (const d of collectedData) {
+    const urlMatch = (d.source || '').match(/https?:\/\/[^\s)]+/);
+    if (urlMatch) sourceUrls.push(urlMatch[0]);
+  }
+
   const finalResult = {
     summary,
     insights,
+    sources: [...new Set(sourceUrls)],
     visitedUrls: gatherResult.visitedUrls || [],
     dataSourceCount: collectedData.length
   };
