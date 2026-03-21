@@ -29,10 +29,12 @@ for (const dir of dirs) {
   console.log(`Cleared: ${dir} (${count} files)`);
 }
 
-const visitedPath = path.resolve(ROOT, 'brain/visited-urls.json');
-if (fs.existsSync(visitedPath)) {
-  fs.unlinkSync(visitedPath);
-  console.log('Cleared: brain/visited-urls.json');
+for (const file of ['brain/visited-urls.json', 'brain/chat-history.json']) {
+  const absPath = path.resolve(ROOT, file);
+  if (fs.existsSync(absPath)) {
+    fs.unlinkSync(absPath);
+    console.log('Cleared: ' + file);
+  }
 }
 
 console.log('\nReset complete. All research data, modules, and work logs have been cleared.');

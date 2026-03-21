@@ -41,6 +41,26 @@ function log(level, message, data) {
   }
 }
 
+// --- Chat History ---
+const CHAT_HISTORY_PATH = path.join(ROOT, 'brain', 'chat-history.json');
+const MAX_CHAT_HISTORY = 200;
+
+function loadChatHistory() {
+  try {
+    if (fs.existsSync(CHAT_HISTORY_PATH)) return JSON.parse(fs.readFileSync(CHAT_HISTORY_PATH, 'utf-8'));
+  } catch {}
+  return [];
+}
+
+function saveChatMessage(role, text) {
+  const history = loadChatHistory();
+  history.push({ role, text, timestamp: new Date().toISOString() });
+  while (history.length > MAX_CHAT_HISTORY) history.shift();
+  const dir = path.dirname(CHAT_HISTORY_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(CHAT_HISTORY_PATH, JSON.stringify(history), 'utf-8');
+}
+
 // --- Config ---
 let config;
 let ollamaClient = null;
@@ -559,6 +579,9 @@ function startServer(port) {
         const count = parseInt(url.searchParams.get('count') || '50', 10);
         res.end(JSON.stringify(logs.slice(-count)));
 
+      } else if (method === 'GET' && url.pathname === '/chat-history') {
+        res.end(JSON.stringify(loadChatHistory()));
+
       } else if (method === 'POST' && url.pathname === '/analyze') {
         let body = '';
         for await (const chunk of req) body += chunk;
@@ -598,10 +621,13 @@ function startServer(port) {
 
         // Immediate response from existing knowledge
         log('info', `User chat: ${message.slice(0, 80)}`);
+        saveChatMessage('user', message);
         try {
           const reply = await chat(ollamaClient, message, {
             knowledge: knowledgeSummary
           });
+
+          saveChatMessage('assistant', reply);
 
           // Detect if user message is a research directive and update searchPrompt
           detectAndUpdateSearchPrompt(ollamaClient, message);

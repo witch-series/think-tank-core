@@ -17,6 +17,7 @@ brain/modules/
 brain/work-logs/
 brain/knowledge-db/
 brain/visited-urls.json
+brain/chat-history.json
 
 # Summary files (generated)
 *.summary.json

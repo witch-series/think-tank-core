@@ -460,6 +460,22 @@
       if (e.key === 'Enter') searchKnowledge();
     });
 
+    // --- Load chat history ---
+    async function loadChatHistory() {
+      try {
+        const res = await fetch(apiUrl + '/chat-history');
+        const history = await res.json();
+        if (Array.isArray(history) && history.length > 0) {
+          chatArea.innerHTML = '';
+          for (const msg of history) {
+            if (msg.role === 'user' || msg.role === 'assistant') {
+              addChatMsg(msg.role, msg.text);
+            }
+          }
+        }
+      } catch {}
+    }
+
     // --- Init ---
     async function init() {
       try {
@@ -467,6 +483,7 @@
         const data = await res.json();
         apiUrl = data.url;
       } catch {}
+      await loadChatHistory();
       fetchStatus();
       fetchLogs();
       fetchSummary();
