@@ -3,9 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
-const { queryOllama } = require('../explorers/crawler');
+// OllamaClient is passed as parameter to all LLM-calling functions
 const { validateCode } = require('../lib/configurator');
-const { runInSandbox } = require('../lib/sandbox');
+const { runInSandbox, validateSyntax, testFile } = require('../lib/sandbox');
+const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 
 // --- Git helpers ---
 
@@ -153,27 +154,16 @@ function saveKnowledge(knowledgeDbPath, category, data) {
 
 // --- Autonomous question generation ---
 
-async function generateNextQuestion(ollamaUrl, model, context) {
-  const prompt = `あなたは自律的な研究AIです。現在のコードベースと知識の状態を踏まえ、次に調査・改善すべきテーマを1つ提案してください。
+async function generateNextQuestion(client, context) {
+  const prompt = fillPrompt('generate-next-question.user', {
+    fileCount: String(context.fileCount),
+    knowledgeCount: String(context.knowledgeCount),
+    recentActivity: context.recentActivity || 'なし',
+    functionList: context.functionList || 'なし'
+  });
 
-## 現在の状態
-- 解析済みファイル数: ${context.fileCount}
-- 蓄積知識数: ${context.knowledgeCount}
-- 直近の活動: ${context.recentActivity || 'なし'}
-
-## 既知の関数一覧
-${context.functionList || 'なし'}
-
-以下のJSON形式で返答してください:
-{
-  "topic": "調査テーマ",
-  "type": "research|refactor|explore",
-  "reason": "このテーマを選んだ理由",
-  "query": "具体的な調査クエリ"
-}`;
-
-  const response = await queryOllama(ollamaUrl, model, prompt,
-    'あなたはソフトウェア改善を専門とする自律AIです。実用的で具体的な提案をしてください。');
+  const response = await client.query(prompt,
+    loadPrompt('generate-next-question.system'));
 
   try {
     const jsonMatch = response.response.match(/\{[\s\S]*\}/);
@@ -185,8 +175,7 @@ ${context.functionList || 'なし'}
 
 // --- Dream Phase ---
 
-async function dreamPhase(config, repoPath) {
-  const { url, model, dreamModel } = config.ollama;
+async function dreamPhase(client, config, repoPath) {
   const knowledgeDbPath = path.resolve(repoPath, config.knowledgeDb);
 
   const commits = await getRecentCommits(repoPath);
@@ -198,24 +187,14 @@ async function dreamPhase(config, repoPath) {
     if (diff) diffs.push({ commit: commit.message, diff: diff.slice(0, 2000) });
   }
 
-  const prompt = `以下は直近24時間の活動記録です。これらから学習すべきパターンと改善点を分析してください。
+  const prompt = fillPrompt('dream-phase.user', {
+    commitDiffs: diffs.map(d => `### ${d.commit}\n\`\`\`\n${d.diff}\n\`\`\``).join('\n\n'),
+    knowledge: knowledge.map(k => JSON.stringify(k)).join('\n')
+  });
 
-## コミット履歴と差分
-${diffs.map(d => `### ${d.commit}\n\`\`\`\n${d.diff}\n\`\`\``).join('\n\n')}
-
-## 新規獲得知識
-${knowledge.map(k => JSON.stringify(k)).join('\n')}
-
-以下のJSON形式で返答してください:
-{
-  "patterns": ["学習パターン1"],
-  "improvements": ["改善提案1"],
-  "risks": ["注意点1"],
-  "nextTasks": [{"topic": "タスク名", "type": "research|refactor", "query": "具体的な内容"}]
-}`;
-
-  const response = await queryOllama(url, dreamModel || model, prompt,
-    '既存の安定したコード構造（JSDoc規約）を維持しつつ、改善案を提示してください。破壊的変更は提案しないでください。');
+  const response = await client.query(prompt,
+    loadPrompt('dream-phase.system'),
+    { model: client.dreamModel });
 
   let analysis;
   try {
@@ -235,59 +214,62 @@ ${knowledge.map(k => JSON.stringify(k)).join('\n')}
 
 // --- Refactoring ---
 
-async function proposeRefactor(ollamaUrl, model, filePath) {
+async function proposeRefactor(client, filePath) {
   const code = fs.readFileSync(filePath, 'utf-8');
   const validation = validateCode(code);
 
-  const prompt = `以下のコードを分析し、改善提案をしてください。セキュリティ問題があれば必ず指摘してください。
+  const prompt = fillPrompt('propose-refactor.user', {
+    filePath,
+    issues: JSON.stringify(validation.issues),
+    code
+  });
 
-ファイル: ${filePath}
-既知の問題: ${JSON.stringify(validation.issues)}
+  const response = await client.query(prompt);
+  const responseText = (response.response || '').trim();
 
-\`\`\`javascript
-${code}
-\`\`\`
-
-以下のJSON形式で返答してください:
-{
-  "suggestions": [{"type": "improvement", "description": "...", "priority": "high/medium/low"}],
-  "refactoredCode": "改善後のコード全体（変更が必要な場合のみ。不要なら null）"
-}`;
-
-  const response = await queryOllama(ollamaUrl, model, prompt);
-
+  // Try to parse JSON result
+  let result = null;
   try {
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const result = JSON.parse(jsonMatch[0]);
-
-      if (result.refactoredCode && result.refactoredCode !== 'null') {
-        const newValidation = validateCode(result.refactoredCode);
-        if (!newValidation.valid) {
-          return { suggestions: result.suggestions, applied: false, reason: 'Critical issues in refactored code' };
-        }
-
-        const sandboxResult = await runInSandbox(`
-          const code = ${JSON.stringify(result.refactoredCode)};
-          new Function(code);
-          console.log('Syntax OK');
-        `);
-
-        if (!sandboxResult.success) {
-          return { suggestions: result.suggestions, applied: false, reason: 'Sandbox validation failed' };
-        }
-
-        return { suggestions: result.suggestions, refactoredCode: result.refactoredCode, applied: false };
-      }
-
-      return { suggestions: result.suggestions, applied: false, reason: 'No code changes proposed' };
-    }
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) result = JSON.parse(jsonMatch[0]);
   } catch {}
 
-  return { suggestions: [], applied: false };
+  // If JSON parse failed, try to extract code block as refactored code
+  if (!result) {
+    const codeMatch = responseText.match(/```(?:javascript|js)?\s*\n([\s\S]*?)```/);
+    if (codeMatch) {
+      result = { suggestions: [{ type: 'improvement', description: 'LLM-proposed refactor', priority: 'medium' }], refactoredCode: codeMatch[1] };
+    }
+  }
+
+  if (!result) return { suggestions: [], applied: false, reason: 'Failed to parse LLM response' };
+
+  if (result.refactoredCode && result.refactoredCode !== 'null' && result.refactoredCode !== null) {
+    const newValidation = validateCode(result.refactoredCode);
+    if (!newValidation.valid) {
+      return { suggestions: result.suggestions || [], applied: false, reason: 'Critical issues in refactored code' };
+    }
+
+    const syntaxCheck = validateSyntax(result.refactoredCode);
+    if (!syntaxCheck.valid) {
+      return { suggestions: result.suggestions || [], applied: false, reason: `Syntax error: ${syntaxCheck.error}` };
+    }
+
+    return { suggestions: result.suggestions || [], refactoredCode: result.refactoredCode, applied: false };
+  }
+
+  return { suggestions: result.suggestions || [], applied: false, reason: result.reason || 'No code changes proposed' };
 }
 
-async function applyRefactor(repoPath, filePath, refactoredCode) {
+async function applyRefactor(repoPath, filePath, refactoredCode, allowedPaths) {
+  // Safety: only allow editing files within explicitly allowed paths (targetFolders)
+  const relPath = path.relative(repoPath, filePath);
+  const allowed = (allowedPaths || ['brain/modules']).map(p => p.replace(/^\.\//, ''));
+  const isAllowed = allowed.some(p => relPath.startsWith(p));
+  if (!isAllowed) {
+    return { success: false, reason: `Editing ${relPath} is not allowed. Only files in [${allowed.join(', ')}] can be auto-modified.` };
+  }
+
   // Check refactored code for sensitive data before writing
   const sensitiveIssues = containsSensitiveData(refactoredCode);
   if (sensitiveIssues.length > 0) {
@@ -298,52 +280,67 @@ async function applyRefactor(repoPath, filePath, refactoredCode) {
 
   fs.writeFileSync(filePath, refactoredCode, 'utf-8');
 
-  const sandboxResult = await runInSandbox(`require(${JSON.stringify(filePath)})`);
-  if (!sandboxResult.success) {
+  // Validate the written file with node -c (syntax check)
+  const fileCheck = await testFile(filePath);
+  if (!fileCheck.valid) {
     fs.writeFileSync(filePath, backupCode, 'utf-8');
-    return { success: false, reason: 'Runtime validation failed, reverted' };
+    return { success: false, reason: `Syntax validation failed, reverted: ${fileCheck.error}` };
   }
 
-  // Only stage the specific file's parent directory
-  const relDir = path.relative(repoPath, path.dirname(filePath));
-  const commitResult = await autoCommit(repoPath, `refactor: auto-improve ${path.basename(filePath)}`, [relDir || '.']);
+  // Only stage allowed paths
+  const commitResult = await autoCommit(repoPath, `refactor: auto-improve ${path.basename(filePath)}`, allowed);
   return { success: commitResult.success, commit: commitResult.output || commitResult.error };
 }
 
 // --- Code generation from knowledge ---
 
-async function generateModule(ollamaUrl, model, topic, knowledge, modulesDir) {
-  const safeName = topic.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40).toLowerCase();
+async function generateModule(client, topic, knowledge, modulesDir) {
+  const prompt = fillPrompt('generate-module.user', {
+    topic,
+    knowledge: JSON.stringify(knowledge, null, 2)
+  });
+
+  const response = await client.query(prompt,
+    loadPrompt('generate-module.system'));
+
+  // Extract JSON response with filename and code
+  let code = '';
+  let suggestedName = '';
+
+  const responseText = (response.response || '').trim();
+  try {
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed.filename) suggestedName = parsed.filename;
+      if (parsed.code) code = parsed.code;
+    }
+  } catch {}
+
+  // Fallback: extract code block if JSON parse failed
+  if (!code) {
+    code = responseText;
+    const codeBlockMatch = code.match(/```(?:javascript|js)?\s*\n([\s\S]*?)```/);
+    if (codeBlockMatch) {
+      code = codeBlockMatch[1];
+    }
+  }
+
+  // Sanitize suggested filename, fallback to topic-based name
+  if (suggestedName) {
+    suggestedName = suggestedName.replace(/\.js$/, '').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 40).toLowerCase();
+  }
+  if (!suggestedName || suggestedName.length < 3) {
+    // Fallback: use topic but filter only ASCII parts
+    const asciiParts = topic.match(/[a-zA-Z0-9]+/g);
+    suggestedName = asciiParts ? asciiParts.join('-').slice(0, 40).toLowerCase() : `module-${Date.now()}`;
+  }
+
+  const safeName = suggestedName;
   const filePath = path.join(modulesDir, `${safeName}.js`);
 
   // Skip if already exists
   if (fs.existsSync(filePath)) return { skipped: true, file: filePath };
-
-  const prompt = `以下の研究結果に基づいて、実用的なNode.jsモジュールを生成してください。
-
-## テーマ: ${topic}
-
-## 研究結果:
-${JSON.stringify(knowledge, null, 2)}
-
-要件:
-- 'use strict' で始める
-- Node.js標準ライブラリのみ使用
-- module.exports で関数をエクスポート
-- JSDocコメントを含める
-- 実用的で再利用可能なコード
-
-コードのみを返してください（説明不要）。`;
-
-  const response = await queryOllama(ollamaUrl, model, prompt,
-    'あなたはNode.jsの専門家です。安全で堅牢なコードを生成してください。evalやnew Functionは絶対に使わないでください。');
-
-  // Extract code from response
-  let code = response.response;
-  const codeBlockMatch = code.match(/```(?:javascript|js)?\s*\n([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    code = codeBlockMatch[1];
-  }
 
   // Validate
   const validation = validateCode(code);
@@ -356,15 +353,16 @@ ${JSON.stringify(knowledge, null, 2)}
     return { success: false, reason: 'Generated code contains sensitive data' };
   }
 
-  // Sandbox test
-  const sandboxResult = await runInSandbox(`
-    const code = ${JSON.stringify(code)};
-    new Function(code);
-    console.log('Syntax OK');
-  `);
+  // Syntax validation
+  const syntaxCheck = validateSyntax(code);
+  if (!syntaxCheck.valid) {
+    return { success: false, reason: `Syntax error: ${syntaxCheck.error}` };
+  }
 
+  // Sandbox execution test (checks require dependencies, runtime errors)
+  const sandboxResult = await runInSandbox(code);
   if (!sandboxResult.success) {
-    return { success: false, reason: 'Sandbox validation failed' };
+    return { success: false, reason: `Runtime validation failed: ${sandboxResult.error}` };
   }
 
   // Write and commit
@@ -382,15 +380,14 @@ ${JSON.stringify(knowledge, null, 2)}
 
 // --- Chat with LLM ---
 
-async function chat(ollamaUrl, model, userMessage, context) {
-  const systemPrompt = context?.systemPrompt ||
-    'あなたは自律思考エンジンのアシスタントです。ユーザーの質問に簡潔に回答してください。現在のシステム状態に基づいて回答してください。';
+async function chat(client, userMessage, context) {
+  const systemPrompt = context?.systemPrompt || loadPrompt('chat.system');
 
   const prompt = context?.knowledge
     ? `## システムの知識:\n${context.knowledge}\n\n## ユーザーの質問:\n${userMessage}`
     : userMessage;
 
-  const response = await queryOllama(ollamaUrl, model, prompt, systemPrompt);
+  const response = await client.query(prompt, systemPrompt);
   return response.response;
 }
 

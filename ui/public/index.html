@@ -44,9 +44,21 @@
     .chat-area { max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
     .chat-msg { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; line-height: 1.5; }
     .chat-msg.user { color: #8be9fd; }
-    .chat-msg.user::before { content: 'You: '; font-weight: bold; }
     .chat-msg.assistant { color: #f8f8f2; }
-    .chat-msg.assistant::before { content: 'AI: '; color: #bd93f9; font-weight: bold; }
+    .chat-msg .role-label { font-weight: bold; }
+    .chat-msg.user .role-label { color: #8be9fd; }
+    .chat-msg.assistant .role-label { color: #bd93f9; }
+    .chat-msg .md-body { display: inline; }
+    .chat-msg .md-body p { margin: 4px 0; }
+    .chat-msg .md-body code { background: #282a36; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    .chat-msg .md-body pre { background: #282a36; padding: 8px; border-radius: 4px; margin: 6px 0; overflow-x: auto; }
+    .chat-msg .md-body pre code { background: none; padding: 0; }
+    .chat-msg .md-body ul, .chat-msg .md-body ol { margin: 4px 0 4px 20px; }
+    .chat-msg .md-body h1, .chat-msg .md-body h2, .chat-msg .md-body h3 { margin: 8px 0 4px; font-size: 14px; color: #8be9fd; }
+    .chat-msg .md-body blockquote { border-left: 3px solid #6272a4; padding-left: 8px; margin: 4px 0; color: #999; }
+    .chat-msg .md-body table { border-collapse: collapse; margin: 6px 0; }
+    .chat-msg .md-body th, .chat-msg .md-body td { border: 1px solid #444; padding: 4px 8px; font-size: 12px; }
+    .chat-msg .md-body th { background: #282a36; }
     .chat-msg.thinking { color: #6272a4; font-style: italic; }
     .chat-input { display: flex; gap: 8px; }
     .chat-input input { flex: 1; background: #111; border: 1px solid #333; color: #f8f8f2; padding: 8px; font-family: inherit; font-size: 13px; border-radius: 4px; }
@@ -106,8 +118,29 @@
 
   <div class="footer">Auto-refresh: 5s</div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     let apiUrl = 'http://localhost:3000';
+
+    // Configure marked for safe rendering
+    if (typeof marked !== 'undefined') {
+      marked.setOptions({ breaks: true, gfm: true });
+    }
+    function sanitizeHtml(html) {
+      // Remove script tags, event handlers, and dangerous attributes
+      return html
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
+        .replace(/\son\w+\s*=/gi, ' data-removed=')
+        .replace(/javascript\s*:/gi, '')
+        .replace(/<(link|meta|base|object|embed|form|input|button|select|textarea)\b[^>]*>/gi, '');
+    }
+    function renderMd(text) {
+      if (typeof marked !== 'undefined' && marked.parse) {
+        try { return sanitizeHtml(marked.parse(text)); } catch {}
+      }
+      return esc(text);
+    }
 
     // --- Tabs ---
     document.querySelectorAll('.tab').forEach(tab => {
@@ -188,7 +221,13 @@
     function addChatMsg(role, text) {
       const div = document.createElement('div');
       div.className = 'chat-msg ' + role;
-      div.textContent = text;
+      if (role === 'assistant') {
+        div.innerHTML = '<span class="role-label">AI: </span><span class="md-body">' + renderMd(text) + '</span>';
+      } else if (role === 'user') {
+        div.innerHTML = '<span class="role-label">You: </span>' + esc(text);
+      } else {
+        div.textContent = text;
+      }
       chatArea.appendChild(div);
       chatArea.scrollTop = chatArea.scrollHeight;
       return div;
@@ -249,7 +288,7 @@
             '<span class="k-category">' + esc(e._category) + '</span>' +
             '<div class="k-topic">' + esc(topic) + '</div>' +
             '<div class="k-time">' + esc(time) + '</div>' +
-            '<div class="k-body">' + esc(body) + '</div>' +
+            '<div class="k-body">' + renderMd(body) + '</div>' +
             '</div>';
         }).join('');
       } catch {

@@ -12,7 +12,7 @@ const {
   generateModule, chat, getNewKnowledge
 } = require('./core/evolution');
 const { doubleCheck } = require('./explorers/verifier');
-const { setThinkingCallback } = require('./explorers/crawler');
+const { OllamaClient } = require('./lib/ollama-client');
 const { analyzeFolder, analyzeFolderWithLLM, scanDirectory } = require('./lib/analyzer');
 const { runAgentLoop } = require('./core/agent-loop');
 const { loadConfig } = require('./lib/configurator');
@@ -41,6 +41,7 @@ function log(level, message, data) {
 
 // --- Config ---
 let config;
+let ollamaClient = null;
 
 // --- Server & Timer state (for restart) ---
 let httpServer = null;
@@ -109,20 +110,24 @@ function collectContext() {
 }
 
 // --- Autonomous Task Generation ---
+let cycleCount = 0;
+const CODE_ANALYSIS_EVERY_N_CYCLES = 60; // Run code analysis roughly once per hour (taskInterval * N)
+
 function scheduleAutonomousTasks() {
-  const { url, model } = config.ollama;
+  cycleCount++;
   const dbPath = path.resolve(ROOT, config.knowledgeDb);
   const folders = config.targetFolders || [];
   const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
 
-  // Phase 1: Agent-driven research — web search, page fetch, analysis
+  // Primary: Agent-driven research — web search, page fetch, summarization
+  // This runs every cycle to prioritize information gathering
   taskManager.enqueue(createTask('agent:research', async () => {
     const context = collectContext();
     const searchPrompt = config.searchPrompt || '最新の技術トレンドを調査してください';
 
     log('info', `Agent research starting: ${searchPrompt.slice(0, 60)}`);
 
-    const result = await runAgentLoop(url, model, searchPrompt, ROOT, {
+    const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
       workLogDir,
       onLog: log,
       mode: 'research'
@@ -149,33 +154,35 @@ function scheduleAutonomousTasks() {
     return result;
   }));
 
-  // Phase 2: Agent-driven code analysis — read actual files, analyze, summarize
-  taskManager.enqueue(createTask('agent:analyze', async () => {
-    log('info', 'Agent code analysis starting');
+  // Secondary: Code analysis — runs infrequently (~once per hour)
+  if (cycleCount % CODE_ANALYSIS_EVERY_N_CYCLES === 0) {
+    taskManager.enqueue(createTask('agent:analyze', async () => {
+      log('info', 'Agent code analysis starting (periodic)');
 
-    const result = await runAgentLoop(url, model, 'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
-      workLogDir,
-      onLog: log,
-      mode: 'analyze',
-      targetFolders: folders
-    });
-
-    const hasData = (result.insights && result.insights.length > 0) ||
-                    (result.summary && result.summary.length > 10);
-    if (hasData) {
-      saveKnowledge(dbPath, 'analysis', {
-        topic: 'コードベース解析',
-        insights: result.insights || [],
-        summary: result.summary || '',
-        steps: result.steps
+      const result = await runAgentLoop(ollamaClient, 'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
+        workLogDir,
+        onLog: log,
+        mode: 'analyze',
+        targetFolders: folders
       });
-      log('info', `Code analysis saved: ${(result.insights || []).length} findings, ${result.steps} steps`);
-    }
 
-    return result;
-  }));
+      const hasData = (result.insights && result.insights.length > 0) ||
+                      (result.summary && result.summary.length > 10);
+      if (hasData) {
+        saveKnowledge(dbPath, 'analysis', {
+          topic: 'コードベース解析',
+          insights: result.insights || [],
+          summary: result.summary || '',
+          steps: result.steps
+        });
+        log('info', `Code analysis saved: ${(result.insights || []).length} findings, ${result.steps} steps`);
+      }
 
-  // Phase 3: Generate code module from accumulated knowledge
+      return result;
+    }));
+  }
+
+  // Generate code module from accumulated knowledge
   taskManager.enqueue(createTask('generate:module', async () => {
     const knowledge = getNewKnowledge(dbPath, 48);
     if (knowledge.length === 0) {
@@ -195,7 +202,7 @@ function scheduleAutonomousTasks() {
     const modulesDir = path.resolve(ROOT, 'brain', 'modules');
 
     log('info', `Generating module from knowledge: ${topic}`);
-    const result = await generateModule(url, model, topic, entry, modulesDir);
+    const result = await generateModule(ollamaClient, topic, entry, modulesDir);
 
     if (result.success) {
       log('info', `Module generated: ${path.basename(result.file)} (committed: ${result.committed})`);
@@ -207,33 +214,37 @@ function scheduleAutonomousTasks() {
     return result;
   }));
 
-  // Phase 4: Code improvement — pick a file, propose refactor, apply if safe
+  // Phase 4: Code improvement — pick a file from targetFolders ONLY (never edit project core code)
   taskManager.enqueue(createTask('self:improve', async () => {
     const allFiles = [];
+
+    // Include target folders ONLY (brain/modules) — never core/lib/explorers
     for (const folder of folders) {
       allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
     }
+
     if (allFiles.length === 0) {
       log('debug', 'No files to improve yet');
       return { skipped: true };
     }
 
     const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
-    log('info', `Proposing refactor: ${path.relative(ROOT, targetFile)}`);
-    const proposal = await proposeRefactor(url, model, targetFile);
+    const relPath = path.relative(ROOT, targetFile);
+    log('info', `Proposing refactor: ${relPath}`);
+    const proposal = await proposeRefactor(ollamaClient, targetFile);
 
     if (proposal.refactoredCode) {
-      log('info', `Applying refactor to ${path.basename(targetFile)}`);
-      const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode);
+      log('info', `Applying refactor to ${relPath}`);
+      const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode, folders);
       if (result.success) {
-        log('info', `Refactor applied and committed: ${path.basename(targetFile)}`);
+        log('info', `Refactor applied and committed: ${relPath}`);
       } else {
         log('info', `Refactor not applied: ${result.reason}`);
       }
       return { file: targetFile, proposal: proposal.suggestions, applied: result.success };
     }
 
-    log('debug', `No code changes for ${path.basename(targetFile)}: ${proposal.reason || 'no suggestions'}`);
+    log('debug', `No code changes for ${relPath}: ${proposal.reason || 'no suggestions'}`);
     return { file: targetFile, suggestions: proposal.suggestions };
   }));
 }
@@ -252,7 +263,7 @@ function scheduleDream() {
   dreamTimer = setTimeout(async () => {
     log('info', 'Dream phase starting');
     taskManager.prioritize(createTask('dream:phase', async () => {
-      const result = await dreamPhase(config, ROOT);
+      const result = await dreamPhase(ollamaClient, config, ROOT);
       log('info', 'Dream phase completed', result);
 
       const dbPath = path.resolve(ROOT, config.knowledgeDb);
@@ -271,16 +282,16 @@ function scheduleDream() {
 
             const targetFile = files[Math.floor(Math.random() * files.length)];
             log('info', `Dream-driven refactor: ${task.topic} on ${path.basename(targetFile)}`);
-            const proposal = await proposeRefactor(config.ollama.url, config.ollama.model, targetFile);
+            const proposal = await proposeRefactor(ollamaClient, targetFile);
             if (proposal.refactoredCode) {
-              return await applyRefactor(ROOT, targetFile, proposal.refactoredCode);
+              return await applyRefactor(ROOT, targetFile, proposal.refactoredCode, config.targetFolders || []);
             }
             return { suggestions: proposal.suggestions };
           }));
         } else if (task.query) {
           taskManager.enqueue(createTask(`dream:research:${task.topic}`, async () => {
             log('info', `Dream-driven research: ${task.topic}`);
-            const res = await doubleCheck(config.ollama.url, config.ollama.model, task.query);
+            const res = await doubleCheck(ollamaClient, task.query);
             if (res.accepted) {
               saveKnowledge(dbPath, 'research', {
                 topic: task.topic, query: task.query,
@@ -334,6 +345,7 @@ function startServer(port) {
 
         res.end(JSON.stringify({
           taskManager: taskManager.getStatus(),
+          ollama: ollamaClient ? ollamaClient.getStatus() : null,
           knowledge: knowledgeStats,
           lastCommit,
           uptime: process.uptime(),
@@ -357,7 +369,7 @@ function startServer(port) {
 
         const absPath = path.resolve(ROOT, folder);
         taskManager.prioritize(createTask(`manual:analyze:${folder}`, async () => {
-          return analyzeFolderWithLLM(config.ollama.url, config.ollama.model, absPath);
+          return analyzeFolderWithLLM(ollamaClient, absPath);
         }));
 
         res.end(JSON.stringify({ queued: true, folder: absPath }));
@@ -380,26 +392,13 @@ function startServer(port) {
           `[${k.topic || 'unknown'}] ${JSON.stringify(k.insights || k).slice(0, 200)}`
         ).join('\n');
 
-        // Run chat as a prioritized task (user input = highest priority)
-        const taskPromise = new Promise((resolve, reject) => {
-          taskManager.prioritize(createTask('user:chat', async () => {
-            log('info', `User chat: ${message.slice(0, 80)}`);
-            try {
-              const reply = await chat(config.ollama.url, config.ollama.model, message, {
-                systemPrompt: config.searchPrompt,
-                knowledge: knowledgeSummary
-              });
-              resolve(reply);
-              return { message, reply };
-            } catch (err) {
-              reject(err);
-              throw err;
-            }
-          }));
-        });
-
+        // Run chat directly — user interaction should never wait for queued tasks
+        log('info', `User chat: ${message.slice(0, 80)}`);
         try {
-          const reply = await taskPromise;
+          const reply = await chat(ollamaClient, message, {
+            systemPrompt: config.searchPrompt,
+            knowledge: knowledgeSummary
+          });
           res.end(JSON.stringify({ reply }));
         } catch (err) {
           res.statusCode = 500;
@@ -512,12 +511,14 @@ async function restart() {
 function start() {
   log('info', 'Think Tank Core starting');
 
-  // Connect thinking indicator
-  setThinkingCallback((active, context) => {
+  // Create Ollama client with multi-URL failover support
+  ollamaClient = new OllamaClient(config.ollama);
+  ollamaClient.setThinkingCallback((active, context) => {
     if (active) {
       log('info', `Thinking... ${context || ''}`);
     }
   });
+  log('info', `Ollama endpoints: ${ollamaClient.urls.join(', ')} (model: ${ollamaClient.model})`);
 
   // Ensure brain directories exist
   const modulesDir = path.resolve(ROOT, 'brain', 'modules');
@@ -606,6 +607,7 @@ async function main() {
     startCLI({
       taskManager,
       getConfig: () => config,
+      getClient: () => ollamaClient,
       log,
       restart,
       root: ROOT,

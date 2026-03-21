@@ -1,0 +1,5 @@
+「{{taskDescription}}」に関する情報を得られるウェブサイトのURLを5つ提案してください。
+実在する主要なニュースサイト、技術ブログ、公式サイトのURLを返してください。
+
+以下のJSON形式で返してください。JSONのみ出力してください。
+{"urls": ["https://example.com/page1", "https://example.com/page2"]}

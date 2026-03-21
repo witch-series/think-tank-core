@@ -3,9 +3,10 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
-const { queryOllama } = require('../explorers/crawler');
-const { searchWeb, fetchPage } = require('../explorers/searcher');
+// OllamaClient is passed as parameter to LLM-calling functions
+const { searchWeb, fetchPage, searchArxiv } = require('../explorers/searcher');
 const { sanitizeText } = require('./evolution');
+const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 
 const MAX_GATHER_STEPS = 6;
 
@@ -16,12 +17,12 @@ function extractBalancedJson(text) {
   if (start === -1) return null;
   let depth = 0;
   let inString = false;
-  let escape = false;
+  let prevEscape = false;
   for (let i = start; i < text.length; i++) {
     const ch = text[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\') { escape = true; continue; }
-    if (ch === '"' && !escape) { inString = !inString; continue; }
+    if (prevEscape) { prevEscape = false; continue; }
+    if (ch === '\\' && inString) { prevEscape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
     if (inString) continue;
     if (ch === '{' || ch === '[') depth++;
     else if (ch === '}' || ch === ']') {
@@ -209,22 +210,16 @@ function cleanOldWorkLogs(workLogDir, maxAgeHours = 72) {
  * Uses a hybrid approach: LLM decides search queries, but the system
  * automatically fetches top search result pages (no LLM decision needed).
  */
-async function gatherResearch(ollamaUrl, model, taskDescription, onLog) {
+async function gatherResearch(client, taskDescription, onLog) {
   const collectedData = [];
   const executedActions = [];
 
   // Step 1: Ask LLM for search queries based on the task
   onLog('info', 'Generating search queries...');
-  const queryPrompt = `以下の調査テーマについて、ウェブ検索に使うクエリを3つ考えてください。
-日本語と英語を混ぜて幅広く検索できるようにしてください。
+  const queryPrompt = fillPrompt('search-queries.user', { taskDescription });
 
-テーマ: ${taskDescription}
-
-以下のJSON形式で返してください。JSONのみ出力してください。
-{"queries": ["検索クエリ1", "search query 2", "検索クエリ3"]}`;
-
-  const queryResponse = await queryOllama(ollamaUrl, model, queryPrompt,
-    'あなたは検索クエリの専門家です。JSONのみ出力してください。');
+  const queryResponse = await client.query(queryPrompt,
+    loadPrompt('search-queries.system'));
   const queryText = (queryResponse.response || '').trim();
 
   let queries = [];
@@ -275,18 +270,46 @@ async function gatherResearch(ollamaUrl, model, taskDescription, onLog) {
     }
   }
 
+  // Step 2.5: Search academic papers on arxiv
+  for (const query of queries) {
+    const englishQuery = query.replace(/[^\x20-\x7E]/g, '').trim() || taskDescription.replace(/[^\x20-\x7E]/g, '').trim();
+    if (!englishQuery || englishQuery.length < 3) continue;
+
+    onLog('info', `Searching arxiv: "${englishQuery.slice(0, 60)}"`);
+    try {
+      const papers = await searchArxiv(englishQuery, 3);
+      if (papers.length > 0) {
+        collectedData.push({
+          type: 'arxiv_papers',
+          source: `arxiv: ${englishQuery.slice(0, 60)}`,
+          content: papers.map(p => `- [${p.title}] ${p.summary.slice(0, 300)} (${p.url})`).join('\n')
+        });
+        executedActions.push({ action: 'search_arxiv', detail: englishQuery.slice(0, 60), summary: `${papers.length}件` });
+
+        // Fetch full abstract for top paper
+        if (papers[0].url) {
+          const page = await fetchPage(papers[0].url, 6000);
+          if (page.text && page.text.length > 100) {
+            collectedData.push({
+              type: 'arxiv_page',
+              source: `${papers[0].title.slice(0, 60)} (arxiv)`,
+              content: page.text.slice(0, 3000)
+            });
+          }
+        }
+      }
+    } catch {}
+    break; // Only search arxiv once with the best query
+  }
+
   // Step 3: If search failed (rate limited), ask LLM for URLs to try directly
   if (totalSearchResults === 0) {
     onLog('info', 'Search returned no results, asking LLM for source URLs...');
 
-    const urlPrompt = `「${taskDescription}」に関する情報を得られるウェブサイトのURLを5つ提案してください。
-実在する主要なニュースサイト、技術ブログ、公式サイトのURLを返してください。
+    const urlPrompt = fillPrompt('search-fallback-urls.user', { taskDescription });
 
-以下のJSON形式で返してください。JSONのみ出力してください。
-{"urls": ["https://example.com/page1", "https://example.com/page2"]}`;
-
-    const urlResponse = await queryOllama(ollamaUrl, model, urlPrompt,
-      'あなたはウェブリサーチの専門家です。実在するURLのみを提案してください。JSONのみ出力してください。');
+    const urlResponse = await client.query(urlPrompt,
+      loadPrompt('search-fallback-urls.system'));
     const urlObj = parseJson((urlResponse.response || '').trim());
 
     if (urlObj && urlObj.urls && Array.isArray(urlObj.urls)) {
@@ -392,21 +415,10 @@ async function gatherCodeAnalysis(repoPath, targetFolders, onLog) {
 /**
  * Generic gather using LLM tool calls (fallback for non-standard tasks).
  */
-async function gatherGeneric(ollamaUrl, model, taskDescription, repoPath, workLogDir, onLog) {
+async function gatherGeneric(client, taskDescription, repoPath, workLogDir, onLog) {
   const recentLogs = loadRecentWorkLogs(workLogDir);
 
-  const systemPrompt = `あなたはデータ収集エージェントです。
-タスクに必要な情報を集めるために、ツールをJSON形式で呼び出してください。
-説明文は不要です。JSONのみ出力してください。
-
-利用可能なツール:
-- {"action": "search_web", "query": "検索クエリ"}
-- {"action": "fetch_page", "url": "URL"}
-- {"action": "read_file", "path": "ファイルパス"}
-- {"action": "list_files", "path": "ディレクトリ"}
-- {"action": "git_log", "count": 10}
-- {"action": "analyze_code", "path": "ファイルパス"}
-- {"action": "done"}`;
+  const systemPrompt = loadPrompt('gather-generic.system');
 
   const collectedData = [];
   const executedActions = [];
@@ -426,7 +438,7 @@ async function gatherGeneric(ollamaUrl, model, taskDescription, repoPath, workLo
       prompt += `最初のアクションをJSON形式で返してください。\n`;
     }
 
-    const response = await queryOllama(ollamaUrl, model, prompt, systemPrompt);
+    const response = await client.query(prompt, systemPrompt);
     const action = parseAction((response.response || '').trim());
 
     if (!action) {
@@ -481,7 +493,7 @@ async function gatherGeneric(ollamaUrl, model, taskDescription, repoPath, workLo
  * Summarize collected data into structured insights.
  * Uses a single dedicated LLM call with all gathered content.
  */
-async function summarizeFindings(ollamaUrl, model, taskDescription, collectedData, onLog) {
+async function summarizeFindings(client, taskDescription, collectedData, onLog) {
   if (collectedData.length === 0) {
     return { summary: 'データを収集できませんでした', insights: [] };
   }
@@ -502,25 +514,17 @@ async function summarizeFindings(ollamaUrl, model, taskDescription, collectedDat
     totalLen += entry.length;
   }
 
-  const prompt = `以下のデータを分析して、重要な発見を日本語でまとめてください。
+  const prompt = fillPrompt('summarize-findings.user', {
+    taskDescription,
+    sourceCount: String(collectedData.length),
+    dataSection
+  });
 
-# テーマ
-${taskDescription}
-
-# 収集データ（${collectedData.length}件のソース）
-${dataSection}
-
-# 指示
-上記のデータから重要な知見を抽出し、以下のJSON形式で返してください。
-説明文は不要です。JSONのみ出力してください。
-
-{"summary": "全体の要約を200文字以内で", "insights": ["具体的な発見1", "具体的な発見2", "具体的な発見3"]}`;
-
-  const systemPrompt = 'データ分析の専門家として、収集データから知見を抽出してJSON形式で出力してください。JSONのみ返してください。余計な説明は不要です。';
+  const systemPrompt = loadPrompt('summarize-findings.system');
 
   onLog('info', `Summarizing ${collectedData.length} sources...`);
 
-  const response = await queryOllama(ollamaUrl, model, prompt, systemPrompt);
+  const response = await client.query(prompt, systemPrompt);
   const responseText = (response.response || '').trim();
 
   // Try to parse JSON (with or without "action" field)
@@ -547,13 +551,12 @@ ${dataSection}
  * 1. Gather: Collect data (web search, file reading, etc.)
  * 2. Summarize: Dedicated LLM call to produce structured insights
  *
- * @param {string} ollamaUrl - Ollama API URL
- * @param {string} model - Model name
+ * @param {import('../lib/ollama-client').OllamaClient} client - Ollama client
  * @param {string} taskDescription - What to investigate
  * @param {string} repoPath - Repository root path
  * @param {object} options - { workLogDir, onLog, mode: 'research'|'analyze'|'generic' }
  */
-async function runAgentLoop(ollamaUrl, model, taskDescription, repoPath, options = {}) {
+async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   const workLogDir = options.workLogDir || path.join(repoPath, 'brain', 'work-logs');
   const onLog = options.onLog || (() => {});
   const mode = options.mode || 'generic';
@@ -565,12 +568,12 @@ async function runAgentLoop(ollamaUrl, model, taskDescription, repoPath, options
   onLog('info', `Agent Phase 1: Gathering (${mode})...`);
 
   if (mode === 'research') {
-    gatherResult = await gatherResearch(ollamaUrl, model, taskDescription, onLog);
+    gatherResult = await gatherResearch(client, taskDescription, onLog);
   } else if (mode === 'analyze') {
     const targetFolders = options.targetFolders || ['.'];
     gatherResult = await gatherCodeAnalysis(repoPath, targetFolders, onLog);
   } else {
-    gatherResult = await gatherGeneric(ollamaUrl, model, taskDescription, repoPath, workLogDir, onLog);
+    gatherResult = await gatherGeneric(client, taskDescription, repoPath, workLogDir, onLog);
   }
 
   const { collectedData, executedActions } = gatherResult;
@@ -579,7 +582,7 @@ async function runAgentLoop(ollamaUrl, model, taskDescription, repoPath, options
   // Phase 2: Summarize
   onLog('info', 'Agent Phase 2: Summarizing...');
   const { summary, insights } = await summarizeFindings(
-    ollamaUrl, model, taskDescription, collectedData, onLog
+    client, taskDescription, collectedData, onLog
   );
   onLog('info', `Summary complete: ${insights.length} insights`);
 

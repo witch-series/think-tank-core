@@ -1,0 +1,14 @@
+以下のコードを分析し、改善提案をしてください。セキュリティ問題があれば必ず指摘してください。
+
+ファイル: {{filePath}}
+既知の問題: {{issues}}
+
+```javascript
+{{code}}
+```
+
+以下のJSON形式で返答してください:
+{
+  "suggestions": [{"type": "improvement", "description": "...", "priority": "high/medium/low"}],
+  "refactoredCode": "改善後のコード全体（変更が必要な場合のみ。不要なら null）"
+}

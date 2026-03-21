@@ -4,41 +4,84 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
+const MAX_REDIRECTS = 5;
+const DEFAULT_TIMEOUT = 15000;
+
 function fetch(urlString, options = {}) {
+  const maxRedirects = options.maxRedirects ?? MAX_REDIRECTS;
+  const timeout = options.timeout ?? DEFAULT_TIMEOUT;
+
   return new Promise((resolve, reject) => {
-    const url = new URL(urlString);
-    const client = url.protocol === 'https:' ? https : http;
+    let redirectCount = 0;
 
-    const reqOptions = {
-      hostname: url.hostname,
-      port: url.port,
-      path: url.pathname + url.search,
-      method: options.method || 'GET',
-      headers: {
-        'User-Agent': 'ThinkTank/1.0',
-        ...options.headers
+    function doRequest(currentUrl, currentOptions) {
+      const url = new URL(currentUrl);
+      const client = url.protocol === 'https:' ? https : http;
+
+      const body = currentOptions.body
+        ? (typeof currentOptions.body === 'string' ? currentOptions.body : JSON.stringify(currentOptions.body))
+        : null;
+
+      const reqOptions = {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname + url.search,
+        method: currentOptions.method || 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          ...currentOptions.headers
+        },
+        timeout
+      };
+
+      // Add Content-Length for POST bodies
+      if (body && (currentOptions.method || '').toUpperCase() === 'POST') {
+        reqOptions.headers['Content-Length'] = Buffer.byteLength(body);
       }
-    };
 
-    const req = client.request(reqOptions, (res) => {
-      let data = '';
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => {
-        resolve({
-          status: res.statusCode,
-          headers: res.headers,
-          body: data
+      const req = client.request(reqOptions, (res) => {
+        // Handle redirects (301, 302, 303, 307, 308)
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          redirectCount++;
+          if (redirectCount > maxRedirects) {
+            resolve({ status: res.statusCode, headers: res.headers, body: '' });
+            return;
+          }
+          // Consume the response body to free the socket
+          res.resume();
+          const redirectUrl = new URL(res.headers.location, currentUrl).href;
+          // 303 always becomes GET; 301/302 become GET for non-GET/HEAD
+          const method = (res.statusCode === 303 || ([301, 302].includes(res.statusCode) && currentOptions.method !== 'HEAD'))
+            ? 'GET' : (currentOptions.method || 'GET');
+          doRequest(redirectUrl, { ...currentOptions, method, body: method === 'GET' ? null : currentOptions.body });
+          return;
+        }
+
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: data
+          });
         });
       });
-    });
 
-    req.on('error', reject);
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Request timed out'));
+      });
 
-    if (options.body) {
-      req.write(typeof options.body === 'string' ? options.body : JSON.stringify(options.body));
+      if (body) {
+        req.write(body);
+      }
+
+      req.end();
     }
 
-    req.end();
+    doRequest(urlString, options);
   });
 }
 
@@ -60,80 +103,4 @@ async function fetchWithRetry(urlString, options = {}, maxRetries = 3) {
   }
 }
 
-// Thinking indicator callback — set by caller to display status
-let thinkingCallback = null;
-
-function setThinkingCallback(fn) {
-  thinkingCallback = fn;
-}
-
-function notifyThinking(active, context) {
-  if (thinkingCallback) thinkingCallback(active, context);
-}
-
-async function queryOllama(ollamaUrl, model, prompt, system) {
-  const payload = {
-    model,
-    prompt,
-    system: system || 'You are a research assistant. Extract structured information.',
-    stream: false
-  };
-
-  notifyThinking(true, `Querying ${model}...`);
-
-  try {
-    const res = await fetchWithRetry(`${ollamaUrl}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: payload,
-      onRetry: (attempt, max, err, delay) => {
-        notifyThinking(true, `Connection error (${err.code}), retry ${attempt}/${max} in ${delay / 1000}s...`);
-      }
-    });
-
-    notifyThinking(false);
-
-    if (res.status !== 200) {
-      throw new Error(`Ollama returned status ${res.status}: ${res.body}`);
-    }
-
-    return JSON.parse(res.body);
-  } catch (err) {
-    notifyThinking(false);
-    throw err;
-  }
-}
-
-async function extractInsights(ollamaUrl, model, sourceText, systemPrompt) {
-  const prompt = `以下のテキストから「課題」「行動」「残課題」「可能性」の4項目を抽出してJSON形式で返してください。
-
-テキスト:
-${sourceText}
-
-以下のJSON形式で返答してください:
-{
-  "issues": ["課題1", "課題2"],
-  "actions": ["行動1", "行動2"],
-  "remaining": ["残課題1", "残課題2"],
-  "possibilities": ["可能性1", "可能性2"]
-}`;
-
-  const response = await queryOllama(ollamaUrl, model, prompt, systemPrompt);
-
-  try {
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-  } catch {}
-
-  return {
-    raw: response.response,
-    issues: [],
-    actions: [],
-    remaining: [],
-    possibilities: []
-  };
-}
-
-module.exports = { fetch, fetchWithRetry, queryOllama, extractInsights, setThinkingCallback };
+module.exports = { fetch, fetchWithRetry };

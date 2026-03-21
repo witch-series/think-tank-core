@@ -1,0 +1,15 @@
+以下は直近24時間の活動記録です。これらから学習すべきパターンと改善点を分析してください。
+
+## コミット履歴と差分
+{{commitDiffs}}
+
+## 新規獲得知識
+{{knowledge}}
+
+以下のJSON形式で返答してください:
+{
+  "patterns": ["学習パターン1"],
+  "improvements": ["改善提案1"],
+  "risks": ["注意点1"],
+  "nextTasks": [{"topic": "タスク名", "type": "research|refactor", "query": "具体的な内容"}]
+}
