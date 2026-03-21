@@ -1,0 +1,17 @@
+{
+  "ollama": {
+    "url": "http://localhost:11434",
+    "model": "llama3",
+    "dreamModel": "llama3"
+  },
+  "server": {
+    "port": 3000
+  },
+  "searchPrompt": "あなたはリサーチアシスタントです。与えられたトピックについて調査し、「課題」「行動」「残課題」「可能性」を抽出してください。",
+  "targetFolders": ["./brain/modules"],
+  "dreamHour": 5,
+  "taskInterval": 60000,
+  "maxConcurrentTasks": 1,
+  "knowledgeDb": "./brain/knowledge-db",
+  "summaryExtension": ".summary.json"
+}

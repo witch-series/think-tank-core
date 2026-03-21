@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Think Tank Core</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Consolas', 'Monaco', monospace; background: #0a0a0a; color: #e0e0e0; padding: 16px; }
+    h1 { font-size: 18px; color: #8be9fd; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .card { background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px; }
+    .card h2 { font-size: 13px; color: #bd93f9; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+    .card.full { grid-column: 1 / -1; }
+    .stat { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #222; font-size: 13px; }
+    .stat:last-child { border-bottom: none; }
+    .stat .label { color: #888; }
+    .stat .value { color: #f8f8f2; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; }
+    .badge.running { background: #1a472a; color: #50fa7b; }
+    .badge.paused { background: #4a3a1a; color: #f1fa8c; }
+    .badge.stopped { background: #4a1a1a; color: #ff5555; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .dot.ok { background: #50fa7b; }
+    .dot.err { background: #ff5555; }
+    .queue-list { font-size: 12px; }
+    .queue-list li { padding: 3px 0; color: #ccc; list-style: none; }
+    .queue-list li::before { content: '▸ '; color: #6272a4; }
+    #logs { max-height: 400px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+    .log-entry { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+    .log-entry.error { color: #ff5555; }
+    .log-entry.warn { color: #f1fa8c; }
+    .log-entry.info { color: #ccc; }
+    .log-entry.debug { color: #6272a4; }
+    .footer { text-align: center; padding: 12px; font-size: 11px; color: #555; }
+  </style>
+</head>
+<body>
+  <h1><span class="dot" id="conn"></span>Think Tank Core Dashboard</h1>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Server Status</h2>
+      <div id="status-body">Connecting...</div>
+    </div>
+    <div class="card">
+      <h2>Task Queue</h2>
+      <div id="queue-body">—</div>
+    </div>
+    <div class="card full">
+      <h2>Knowledge DB</h2>
+      <div id="knowledge-body">—</div>
+    </div>
+    <div class="card full">
+      <h2>Logs</h2>
+      <div id="logs"></div>
+    </div>
+  </div>
+
+  <div class="footer">Auto-refresh: 5s</div>
+
+  <script>
+    let apiUrl = 'http://localhost:3000';
+
+    function formatUptime(sec) {
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = Math.floor(sec % 60);
+      return `${h}h ${m}m ${s}s`;
+    }
+
+    function badge(state) {
+      if (state === 'running') return '<span class="badge running">RUNNING</span>';
+      if (state === 'paused') return '<span class="badge paused">PAUSED</span>';
+      return '<span class="badge stopped">STOPPED</span>';
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch(apiUrl + '/status');
+        const data = await res.json();
+        const tm = data.taskManager;
+        const state = tm.paused ? 'paused' : tm.running ? 'running' : 'stopped';
+
+        document.getElementById('conn').className = 'dot ok';
+
+        document.getElementById('status-body').innerHTML = [
+          `<div class="stat"><span class="label">State</span><span class="value">${badge(state)}</span></div>`,
+          `<div class="stat"><span class="label">Current Task</span><span class="value">${tm.currentTask || '—'}</span></div>`,
+          `<div class="stat"><span class="label">Queue</span><span class="value">${tm.queueLength} tasks</span></div>`,
+          `<div class="stat"><span class="label">Uptime</span><span class="value">${formatUptime(data.uptime)}</span></div>`,
+          `<div class="stat"><span class="label">Last Commit</span><span class="value">${data.lastCommit ? data.lastCommit.message : '—'}</span></div>`,
+        ].join('');
+
+        document.getElementById('knowledge-body').innerHTML = [
+          `<div class="stat"><span class="label">Files</span><span class="value">${data.knowledge.files}</span></div>`,
+          `<div class="stat"><span class="label">Entries</span><span class="value">${data.knowledge.entries}</span></div>`,
+        ].join('');
+
+        if (tm.queuedTasks.length === 0) {
+          document.getElementById('queue-body').innerHTML = '<span style="color:#666">Empty</span>';
+        } else {
+          document.getElementById('queue-body').innerHTML =
+            '<ul class="queue-list">' + tm.queuedTasks.map(t => `<li>${t}</li>`).join('') + '</ul>';
+        }
+      } catch {
+        document.getElementById('conn').className = 'dot err';
+        document.getElementById('status-body').innerHTML = '<span style="color:#ff5555">Connection failed</span>';
+      }
+    }
+
+    async function fetchLogs() {
+      try {
+        const res = await fetch(apiUrl + '/logs?count=100');
+        const data = await res.json();
+        const container = document.getElementById('logs');
+        const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
+
+        container.innerHTML = data.map(e => {
+          const ts = e.timestamp.split('T')[1].split('.')[0];
+          return `<div class="log-entry ${e.level}">[${ts}] [${e.level}] ${e.message}</div>`;
+        }).join('');
+
+        if (wasAtBottom) container.scrollTop = container.scrollHeight;
+      } catch {}
+    }
+
+    async function init() {
+      try {
+        const res = await fetch('/api-url');
+        const data = await res.json();
+        apiUrl = data.url;
+      } catch {}
+
+      fetchStatus();
+      fetchLogs();
+      setInterval(fetchStatus, 5000);
+      setInterval(fetchLogs, 5000);
+    }
+
+    init();
+  </script>
+</body>
+</html>
