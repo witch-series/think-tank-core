@@ -134,18 +134,22 @@ function scheduleAutonomousTasks() {
       systemContext: `検索プロンプト: ${searchPrompt}\n知識数: ${context.knowledgeCount}\nファイル数: ${context.fileCount}`
     });
 
-    // Save successful research to knowledge DB
-    if (result.insights && result.insights.length > 0) {
+    // Always save research results to knowledge DB (summary + any insights)
+    const hasInsights = result.insights && result.insights.length > 0;
+    const hasSummary = result.summary && result.summary.length > 10;
+
+    if (hasInsights || hasSummary) {
       saveKnowledge(dbPath, 'research', {
         topic: searchPrompt.slice(0, 50),
         query: searchPrompt,
-        insights: result.insights,
-        summary: result.summary,
-        steps: result.steps
+        insights: result.insights || [],
+        summary: result.summary || '',
+        steps: result.steps,
+        actions: result.actions || []
       });
-      log('info', `Research complete: ${result.insights.length} insights saved (${result.steps} steps)`);
+      log('info', `Research saved: ${(result.insights || []).length} insights, ${result.steps} steps`);
     } else {
-      log('info', `Research complete: ${result.summary?.slice(0, 100) || 'no insights'}`);
+      log('info', `Research yielded no results: ${result.summary?.slice(0, 100) || 'empty'}`);
     }
 
     return result;
@@ -171,14 +175,16 @@ function scheduleAutonomousTasks() {
       onLog: log
     });
 
-    if (result.insights && result.insights.length > 0) {
+    const hasData = (result.insights && result.insights.length > 0) ||
+                    (result.summary && result.summary.length > 10);
+    if (hasData) {
       saveKnowledge(dbPath, 'analysis', {
         topic: 'コードベース解析',
-        insights: result.insights,
-        summary: result.summary,
+        insights: result.insights || [],
+        summary: result.summary || '',
         steps: result.steps
       });
-      log('info', `Code analysis complete: ${result.insights.length} findings`);
+      log('info', `Code analysis saved: ${(result.insights || []).length} findings, ${result.steps} steps`);
     }
 
     return result;
