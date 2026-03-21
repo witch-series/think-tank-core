@@ -57,13 +57,36 @@ function fetch(urlString, options = {}) {
           return;
         }
 
-        let data = '';
-        res.on('data', chunk => { data += chunk; });
+        const chunks = [];
+        res.on('data', chunk => { chunks.push(chunk); });
         res.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          // Detect charset from Content-Type header or meta tag
+          const ct = (res.headers['content-type'] || '').toLowerCase();
+          let charset = '';
+          const ctMatch = ct.match(/charset\s*=\s*([^\s;]+)/);
+          if (ctMatch) charset = ctMatch[1].replace(/['"]/g, '').toLowerCase();
+
+          // Fallback: check <meta> charset in first 2KB of raw data
+          if (!charset) {
+            const head = buf.slice(0, 2048).toString('ascii');
+            const metaMatch = head.match(/charset\s*=\s*["']?\s*([^"'\s;>]+)/i);
+            if (metaMatch) charset = metaMatch[1].toLowerCase();
+          }
+
+          let body;
+          const jpEncodings = { 'shift_jis': 'shift_jis', 'shift-jis': 'shift_jis', 'sjis': 'shift_jis', 'x-sjis': 'shift_jis',
+            'euc-jp': 'euc-jp', 'iso-2022-jp': 'iso-2022-jp' };
+          if (charset && jpEncodings[charset]) {
+            try { body = new TextDecoder(jpEncodings[charset]).decode(buf); }
+            catch { body = buf.toString('utf-8'); }
+          } else {
+            body = buf.toString('utf-8');
+          }
           resolve({
             status: res.statusCode,
             headers: res.headers,
-            body: data
+            body
           });
         });
       });
