@@ -57,12 +57,12 @@ think-tank> restart     # コード・設定を再読み込み
 cd ui && npm install && node server.js
 ```
 
-`http://localhost:3001` でサーバー状態・タスクキュー・ログをリアルタイム監視。
+`http://localhost:2510` でサーバー状態・タスクキュー・ログをリアルタイム監視。
 
 ### API
 
 ```bash
-curl http://localhost:3000/status
-curl http://localhost:3000/logs?count=20
-curl -X POST http://localhost:3000/analyze -d '{"folder":"./brain/modules"}'
+curl http://localhost:2500/status
+curl http://localhost:2500/logs?count=20
+curl -X POST http://localhost:2500/analyze -d '{"folder":"./brain/modules"}'
 ```

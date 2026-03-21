@@ -2,11 +2,11 @@
   "ollama": {
     "url": "http://localhost:11434",
     "model": "llama3",
-    "dreamModel": "llama3"
+    "dreamModel": "gpt-oss:20b"
   },
   "_ollamaUrlHelp": "urlはスペース区切りで複数指定可能。例: http://host1:11434 http://host2:11434 — 3回連続失敗で次のURLに切り替え",
   "server": {
-    "port": 3000
+    "port": 2500
   },
   "searchPrompt": "あなたはリサーチアシスタントです。与えられたトピックについて調査し、「課題」「行動」「残課題」「可能性」を抽出してください。",
   "targetFolders": ["./brain/modules"],

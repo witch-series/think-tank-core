@@ -48,7 +48,7 @@
 │   ├── work-logs/          # エージェントの作業ログ
 │   └── visited-urls.json   # 訪問済みURL一覧（重複検索回避）
 ├── ui/
-│   ├── server.js           # Express UIサーバー（ポート3001）
+│   ├── server.js           # Express UIサーバー（ポート2510）
 │   ├── public/index.html   # ダッシュボードUI（タブ切替・進捗表示・検索機能付き）
 │   └── package.json        # UI依存パッケージ（express）
 └── docs/                   # 実装ドキュメント

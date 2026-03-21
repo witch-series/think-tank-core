@@ -3,8 +3,8 @@
 const express = require('express');
 const path = require('path');
 
-const PORT = process.env.UI_PORT || 3001;
-const API_URL = process.env.API_URL || 'http://localhost:3000';
+const PORT = process.env.UI_PORT || 2510;
+const API_URL = process.env.API_URL || 'http://localhost:2500';
 
 const app = express();
 

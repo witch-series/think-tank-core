@@ -329,7 +329,7 @@ Dream Phase で1日1回実行:
 
 ## API サーバー
 
-`http` モジュールによるミニマルな HTTP サーバー（デフォルトポート: 3000）。
+`http` モジュールによるミニマルな HTTP サーバー（デフォルトポート: 2500）。
 
 ### エンドポイント
 
@@ -343,7 +343,7 @@ Dream Phase で1日1回実行:
 
 ### UI サーバー
 
-`ui/server.js` が Express ベースのダッシュボードUIを提供（デフォルトポート: 3001）。
+`ui/server.js` が Express ベースのダッシュボードUIを提供（デフォルトポート: 2510）。
 
 ### UI構成
 
@@ -366,7 +366,7 @@ Dream Phase で1日1回実行:
 | `ollama.url` | string | `http://localhost:11434` | Ollama エンドポイント（スペース区切りで複数指定可） |
 | `ollama.model` | string | `llama3` | 通常処理用モデル |
 | `ollama.dreamModel` | string | `llama3` | Dream Phase 用モデル |
-| `server.port` | number | `3000` | API サーバーポート |
+| `server.port` | number | `2500` | API サーバーポート |
 | `targetFolders` | string[] | `["./brain/modules"]` | 自己解析・自動編集の対象フォルダ |
 | `dreamHour` | number | `5` | Dream Phase の実行時刻（時） |
 | `taskInterval` | number | `60000` | 自律タスクの間隔（ミリ秒） |
