@@ -13,6 +13,9 @@ logs/
 # Knowledge DB (runtime data)
 brain/knowledge-db/
 
+# Work logs (agent intermediate results)
+brain/work-logs/
+
 # Summary files (generated)
 *.summary.json
 

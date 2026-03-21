@@ -14,6 +14,7 @@ const {
 const { doubleCheck } = require('./explorers/verifier');
 const { extractInsights, setThinkingCallback } = require('./explorers/crawler');
 const { analyzeFolder, analyzeFolderWithLLM, scanDirectory } = require('./lib/analyzer');
+const { runAgentLoop } = require('./core/agent-loop');
 const { loadConfig } = require('./lib/configurator');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
@@ -112,47 +113,78 @@ function scheduleAutonomousTasks() {
   const { url, model } = config.ollama;
   const dbPath = path.resolve(ROOT, config.knowledgeDb);
   const folders = config.targetFolders || [];
+  const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
 
-  // Phase 1: LLM-based code analysis & summary sync
-  for (const folder of folders) {
-    const absPath = path.resolve(ROOT, folder);
-    taskManager.enqueue(createTask(`analyze:${folder}`, async () => {
-      log('info', `LLM analyzing folder: ${folder}`);
-      const summaries = await analyzeFolderWithLLM(url, model, absPath);
-      log('info', `Analysis complete: ${summaries.length} files summarized`);
-      return summaries;
-    }));
-  }
-
-  // Phase 2: LLM generates next research question → explore → double-check → save
-  taskManager.enqueue(createTask('explore:research', async () => {
+  // Phase 1: Agent-driven research — web search, page fetch, analysis
+  taskManager.enqueue(createTask('agent:research', async () => {
     const context = collectContext();
-    log('info', 'Generating next research question');
-    const question = await generateNextQuestion(url, model, context);
-    log('info', `Research topic: ${question.topic} (${question.type})`);
+    const searchPrompt = config.searchPrompt || '最新の技術トレンドを調査してください';
 
-    if (question.type === 'research' || question.type === 'explore') {
-      log('info', `Exploring: ${question.query}`);
-      const result = await doubleCheck(url, model, question.query);
+    // Build task description from search prompt + context
+    const taskDesc = `## 調査指示\n${searchPrompt}\n\n` +
+      `## 現在の知識状態\n- 蓄積知識数: ${context.knowledgeCount}\n- 解析済みファイル数: ${context.fileCount}\n- 直近の活動: ${context.recentActivity}\n\n` +
+      `ウェブ検索（search_web）で最新の情報を収集し、関連ページ（fetch_page）の内容を確認して、` +
+      `重要な発見をメモ（save_note）に残してください。最後にdoneで結果をまとめてください。`;
 
-      if (result.accepted) {
-        saveKnowledge(dbPath, 'research', {
-          topic: question.topic,
-          query: question.query,
-          insights: result.insights,
-          confidence: result.verification.confidence
-        });
-        log('info', `Knowledge saved: ${question.topic} (confidence: ${result.verification.confidence})`);
-      } else {
-        log('info', `Knowledge rejected: ${question.topic} (failed double-check)`);
-      }
-      return { question, result };
+    log('info', `Agent research starting: ${searchPrompt.slice(0, 60)}`);
+
+    const result = await runAgentLoop(url, model, taskDesc, ROOT, {
+      workLogDir,
+      onLog: log,
+      systemContext: `検索プロンプト: ${searchPrompt}\n知識数: ${context.knowledgeCount}\nファイル数: ${context.fileCount}`
+    });
+
+    // Save successful research to knowledge DB
+    if (result.insights && result.insights.length > 0) {
+      saveKnowledge(dbPath, 'research', {
+        topic: searchPrompt.slice(0, 50),
+        query: searchPrompt,
+        insights: result.insights,
+        summary: result.summary,
+        steps: result.steps
+      });
+      log('info', `Research complete: ${result.insights.length} insights saved (${result.steps} steps)`);
+    } else {
+      log('info', `Research complete: ${result.summary?.slice(0, 100) || 'no insights'}`);
     }
 
-    return { question, deferred: true };
+    return result;
   }));
 
-  // Phase 3: Generate code module from recent knowledge
+  // Phase 2: Agent-driven code analysis — read actual files, analyze, summarize
+  taskManager.enqueue(createTask('agent:analyze', async () => {
+    const targetDesc = folders.length > 0
+      ? `対象フォルダ: ${folders.join(', ')}`
+      : 'プロジェクトのルートディレクトリ';
+
+    const taskDesc = `## コードベース解析\n${targetDesc}\n\n` +
+      `1. まず list_files でプロジェクト構造を確認してください\n` +
+      `2. 重要なファイルを read_file または analyze_code で読んでください\n` +
+      `3. git_log で最近の変更を確認してください\n` +
+      `4. コードの品質、構造、改善点を分析してください\n` +
+      `5. 発見をメモ（save_note）に残し、done で結果をまとめてください`;
+
+    log('info', 'Agent code analysis starting');
+
+    const result = await runAgentLoop(url, model, taskDesc, ROOT, {
+      workLogDir,
+      onLog: log
+    });
+
+    if (result.insights && result.insights.length > 0) {
+      saveKnowledge(dbPath, 'analysis', {
+        topic: 'コードベース解析',
+        insights: result.insights,
+        summary: result.summary,
+        steps: result.steps
+      });
+      log('info', `Code analysis complete: ${result.insights.length} findings`);
+    }
+
+    return result;
+  }));
+
+  // Phase 3: Generate code module from accumulated knowledge
   taskManager.enqueue(createTask('generate:module', async () => {
     const knowledge = getNewKnowledge(dbPath, 48);
     if (knowledge.length === 0) {
@@ -496,8 +528,10 @@ function start() {
   // Ensure brain directories exist
   const modulesDir = path.resolve(ROOT, 'brain', 'modules');
   const knowledgeDir = path.resolve(ROOT, config.knowledgeDb);
+  const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
   if (!fs.existsSync(modulesDir)) fs.mkdirSync(modulesDir, { recursive: true });
   if (!fs.existsSync(knowledgeDir)) fs.mkdirSync(knowledgeDir, { recursive: true });
+  if (!fs.existsSync(workLogDir)) fs.mkdirSync(workLogDir, { recursive: true });
 
   // Start task manager
   taskManager.queue = [];
