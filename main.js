@@ -7,7 +7,7 @@ const path = require('path');
 const { TaskManager, createTask } = require('./core/task-manager');
 const {
   dreamPhase, proposeRefactor, applyRefactor,
-  generateNextQuestion, getLastCommit,
+  getLastCommit,
   saveKnowledge, autoCommit, sanitizeText,
   generateModule, chat, getNewKnowledge, getAllKnowledge, compressKnowledge,
   reviewScripts
@@ -96,8 +96,6 @@ function addVisitedUrls(newUrls) {
 }
 
 // --- Helper: detect research intent from user chat and update searchPrompt ---
-// autoSearchPrompt: LLM autonomously decides what to explore next (not persisted to settings.json)
-let autoSearchPrompt = '';
 
 function detectAndUpdateSearchPrompt(client, userMessage) {
   // Fire-and-forget — don't block the chat response
@@ -129,28 +127,6 @@ function detectAndUpdateSearchPrompt(client, userMessage) {
       }
     } catch (e) {
       log('debug', `Research intent detection failed: ${e.message}`);
-    }
-  })();
-}
-
-// --- Helper: LLM autonomously updates its own search direction ---
-function updateAutoSearchPrompt(client, latestSummary, recentTopics) {
-  // Fire-and-forget
-  (async () => {
-    try {
-      const prompt = `直近のリサーチ結果:\n${(latestSummary || '').slice(0, 500)}\n\n最近のトピック:\n${(recentTopics || []).slice(-5).join(', ')}`;
-      const response = await client.query(prompt, loadPrompt('next-search-direction.system'));
-      const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return;
-
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.nextTopic && parsed.nextTopic.length > 5) {
-        autoSearchPrompt = parsed.nextTopic;
-        log('info', `Auto search direction: "${autoSearchPrompt.slice(0, 80)}"`);
-      }
-    } catch (e) {
-      log('debug', `Auto search direction update failed: ${e.message}`);
     }
   })();
 }
@@ -298,7 +274,6 @@ function scheduleAutonomousTasks() {
       lastAnalysis: lastAnalysisCycle ? `${cycleCount - lastAnalysisCycle}サイクル前` : '未実施',
       recentActivity: context.recentActivity,
       userPrompt: config.searchPrompt || 'なし',
-      autoPrompt: autoSearchPrompt || 'なし',
       recentTopics: recentTopics.slice(-5).join(', ') || 'なし',
       recentInsights
     });
@@ -329,17 +304,8 @@ function scheduleAutonomousTasks() {
     switch (action) {
       case 'research':
       case 'deep_research': {
-        const userPrompt = config.searchPrompt || '';
-        const llmPrompt = autoSearchPrompt || '';
-        let searchPrompt;
-
-        if (action === 'deep_research' && topic) {
-          searchPrompt = topic;
-        } else if (userPrompt && llmPrompt) {
-          searchPrompt = `${userPrompt}\n\nまた、以下の関連テーマも探索してください: ${llmPrompt}`;
-        } else {
-          searchPrompt = userPrompt || llmPrompt || '最新の技術トレンドを調査してください';
-        }
+        // Use topic from plan if provided, otherwise user's searchPrompt
+        const searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
 
         setPhase('searching', searchPrompt.slice(0, 60));
         const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
@@ -368,7 +334,6 @@ function scheduleAutonomousTasks() {
             summary: result.summary || ''
           });
           log('info', `Research saved: ${(result.insights || []).length} insights`);
-          updateAutoSearchPrompt(ollamaClient, result.summary, recentTopics);
         }
         return result;
       }
@@ -643,8 +608,7 @@ function startServer(port) {
 
           res.end(JSON.stringify({
             reply,
-            searchPrompt: config.searchPrompt || '',
-            autoSearchPrompt: autoSearchPrompt || ''
+            searchPrompt: config.searchPrompt || ''
           }));
 
           // Background: if the reply suggests insufficient knowledge, search and follow up

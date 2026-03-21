@@ -8,7 +8,8 @@
     "start": "node main.js",
     "setup": "node main.js --setup",
     "analyze": "node main.js --analyze ./brain/modules",
-    "ui": "node ui/server.js"
+    "ui": "node ui/server.js",
+    "reset": "node scripts/reset.js"
   },
   "engines": {
     "node": ">=18.0.0"

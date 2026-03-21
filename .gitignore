@@ -10,11 +10,13 @@ node_modules/
 logs/
 *.log
 
-# Knowledge DB (runtime data)
-brain/knowledge-db/
-
-# Work logs (agent intermediate results)
+# Brain data (user-specific, reset with `npm run reset`)
+brain/research/
+brain/analysis/
+brain/modules/
 brain/work-logs/
+brain/knowledge-db/
+brain/visited-urls.json
 
 # Summary files (generated)
 *.summary.json

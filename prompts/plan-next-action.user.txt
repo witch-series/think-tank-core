@@ -10,9 +10,6 @@
 ## ユーザー指定のリサーチプロンプト
 {{userPrompt}}
 
-## LLMの自律探索テーマ
-{{autoPrompt}}
-
 ## 直近のリサーチトピック（最新5件）
 {{recentTopics}}
 

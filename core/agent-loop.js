@@ -236,8 +236,7 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
     similarNote
   });
 
-  const queryResponse = await client.query(queryPrompt,
-    loadPrompt('search-queries.system'));
+  const queryResponse = await client.query(queryPrompt);
   const queryText = (queryResponse.response || '').trim();
 
   let queries = [];
@@ -252,74 +251,79 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
     queries = [taskDescription.slice(0, 80)];
   }
 
-  // Step 2: Execute searches and auto-fetch top results
+  // Step 2: Execute searches in parallel, then batch-fetch pages
   let totalSearchResults = 0;
 
-  for (const query of queries) {
-    onLog('info', `Searching: "${query}"`);
-    const searchResults = await searchWeb(query, 3);
+  // Run all web searches + arxiv concurrently
+  const englishQuery = queries.map(q => q.replace(/[^\x20-\x7E]/g, '').trim())
+    .find(q => q.length >= 3) || taskDescription.replace(/[^\x20-\x7E]/g, '').trim();
+
+  const searchPromises = queries.map(q => searchWeb(q, 3).catch(() => []));
+  if (englishQuery && englishQuery.length >= 3) {
+    searchPromises.push(searchArxiv(englishQuery, 3).catch(() => []));
+  }
+
+  onLog('info', `Searching ${searchPromises.length} sources in parallel...`);
+  const searchResultSets = await Promise.all(searchPromises);
+
+  // Collect search results and URLs to fetch
+  const pagesToFetch = [];
+
+  for (let i = 0; i < queries.length && i < searchResultSets.length; i++) {
+    const searchResults = searchResultSets[i];
     totalSearchResults += searchResults.length;
 
     if (searchResults.length > 0) {
       collectedData.push({
         type: 'search_results',
-        source: query,
+        source: queries[i],
         content: searchResults.map(r => `- ${r.title}: ${r.snippet}`).join('\n')
       });
 
-      // Auto-fetch top 2 results, skipping already-visited URLs
       for (const result of searchResults.slice(0, 2)) {
         if (!result.url || result.url.includes('duckduckgo.com')) continue;
-        if (visitedUrls.has(result.url)) {
-          onLog('debug', `Skipping visited: ${result.url.slice(0, 60)}`);
-          continue;
-        }
-
-        onLog('info', `Fetching: ${result.url.slice(0, 80)}`);
-        const page = await fetchPage(result.url, 4000);
-        newlyVisited.push(result.url);
-
-        if (page.text && page.text.length > 100) {
-          collectedData.push({
-            type: 'web_page',
-            source: `${result.title} (${result.url.slice(0, 60)})`,
-            content: page.text.slice(0, 3000)
-          });
-        }
+        if (visitedUrls.has(result.url)) continue;
+        pagesToFetch.push({ url: result.url, title: result.title, type: 'web_page' });
       }
     }
   }
 
-  // Step 2.5: Search academic papers on arxiv
-  for (const query of queries) {
-    const englishQuery = query.replace(/[^\x20-\x7E]/g, '').trim() || taskDescription.replace(/[^\x20-\x7E]/g, '').trim();
-    if (!englishQuery || englishQuery.length < 3) continue;
+  // Handle arxiv results (last entry if present)
+  if (englishQuery && englishQuery.length >= 3) {
+    const papers = searchResultSets[searchResultSets.length - 1] || [];
+    if (papers.length > 0) {
+      collectedData.push({
+        type: 'arxiv_papers',
+        source: `arxiv: ${englishQuery.slice(0, 60)}`,
+        content: papers.map(p => `- [${p.title}] ${(p.summary || '').slice(0, 300)} (${p.url})`).join('\n')
+      });
 
-    onLog('info', `Searching arxiv: "${englishQuery.slice(0, 60)}"`);
-    try {
-      const papers = await searchArxiv(englishQuery, 3);
-      if (papers.length > 0) {
-        collectedData.push({
-          type: 'arxiv_papers',
-          source: `arxiv: ${englishQuery.slice(0, 60)}`,
-          content: papers.map(p => `- [${p.title}] ${p.summary.slice(0, 300)} (${p.url})`).join('\n')
-        });
-
-        // Fetch full abstract for top paper (if not visited)
-        if (papers[0].url && !visitedUrls.has(papers[0].url)) {
-          const page = await fetchPage(papers[0].url, 6000);
-          newlyVisited.push(papers[0].url);
-          if (page.text && page.text.length > 100) {
-            collectedData.push({
-              type: 'arxiv_page',
-              source: `${papers[0].title.slice(0, 60)} (arxiv)`,
-              content: page.text.slice(0, 3000)
-            });
-          }
-        }
+      if (papers[0].url && !visitedUrls.has(papers[0].url)) {
+        pagesToFetch.push({ url: papers[0].url, title: papers[0].title, type: 'arxiv_page', maxLen: 6000 });
       }
-    } catch {}
-    break; // Only search arxiv once with the best query
+    }
+  }
+
+  // Batch-fetch all pages in parallel
+  if (pagesToFetch.length > 0) {
+    onLog('info', `Fetching ${pagesToFetch.length} pages in parallel...`);
+    const fetchResults = await Promise.all(
+      pagesToFetch.map(p => fetchPage(p.url, p.maxLen || 4000).catch(() => ({ url: p.url, error: 'fetch failed' })))
+    );
+
+    for (let i = 0; i < fetchResults.length; i++) {
+      const page = fetchResults[i];
+      const meta = pagesToFetch[i];
+      newlyVisited.push(meta.url);
+
+      if (page.text && page.text.length > 100) {
+        collectedData.push({
+          type: meta.type,
+          source: `${(meta.title || '').slice(0, 60)} (${meta.url.slice(0, 60)})`,
+          content: page.text.slice(0, 3000)
+        });
+      }
+    }
   }
 
   // Step 3: If search failed (rate limited), ask LLM for URLs to try directly
@@ -328,8 +332,7 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
 
     const urlPrompt = fillPrompt('search-fallback-urls.user', { taskDescription });
 
-    const urlResponse = await client.query(urlPrompt,
-      loadPrompt('search-fallback-urls.system'));
+    const urlResponse = await client.query(urlPrompt);
     const urlObj = parseJson((urlResponse.response || '').trim());
 
     if (urlObj && urlObj.urls && Array.isArray(urlObj.urls)) {
@@ -541,11 +544,9 @@ async function summarizeFindings(client, taskDescription, collectedData, onLog) 
     dataSection
   });
 
-  const systemPrompt = loadPrompt('summarize-findings.system');
-
   onLog('info', `Summarizing ${collectedData.length} sources...`);
 
-  const response = await client.query(prompt, systemPrompt);
+  const response = await client.query(prompt);
   const responseText = (response.response || '').trim();
 
   // Try to parse JSON (with or without "action" field)

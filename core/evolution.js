@@ -207,7 +207,7 @@ async function compressKnowledge(client, knowledgeDbPath) {
     });
 
     try {
-      const response = await client.query(prompt, loadPrompt('compress-knowledge.system'));
+      const response = await client.query(prompt);
       const text = (response.response || '').trim();
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) continue;
@@ -229,27 +229,6 @@ async function compressKnowledge(client, knowledgeDbPath) {
   return { compressed: results };
 }
 
-// --- Autonomous question generation ---
-
-async function generateNextQuestion(client, context) {
-  const prompt = fillPrompt('generate-next-question.user', {
-    fileCount: String(context.fileCount),
-    knowledgeCount: String(context.knowledgeCount),
-    recentActivity: context.recentActivity || 'なし',
-    functionList: context.functionList || 'なし'
-  });
-
-  const response = await client.query(prompt,
-    loadPrompt('generate-next-question.system'));
-
-  try {
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
-  } catch {}
-
-  return { topic: 'コードベースの品質改善', type: 'refactor', reason: 'デフォルト', query: 'コード品質の改善点を探す' };
-}
-
 // --- Dream Phase ---
 
 async function dreamPhase(client, config, repoPath) {
@@ -269,8 +248,7 @@ async function dreamPhase(client, config, repoPath) {
     knowledge: knowledge.map(k => JSON.stringify(k)).join('\n')
   });
 
-  const response = await client.query(prompt,
-    loadPrompt('dream-phase.system'),
+  const response = await client.query(prompt, null,
     { model: client.dreamModel });
 
   let analysis;
@@ -377,8 +355,7 @@ async function generateModule(client, topic, knowledge, modulesDir) {
     knowledge: JSON.stringify(knowledge, null, 2)
   });
 
-  const response = await client.query(prompt,
-    loadPrompt('generate-module.system'));
+  const response = await client.query(prompt);
 
   // Extract JSON response with filename and code
   let code = '';
@@ -539,7 +516,7 @@ async function reviewScripts(client, modulesDir) {
 module.exports = {
   getRecentCommits, getLastCommit, getDiff, autoCommit,
   getNewKnowledge, getAllKnowledge, saveKnowledge, compressKnowledge,
-  generateNextQuestion, dreamPhase, reviewScripts,
+  dreamPhase, reviewScripts,
   proposeRefactor, applyRefactor,
   sanitizeText, containsSensitiveData,
   generateModule, chat

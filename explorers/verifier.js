@@ -1,6 +1,6 @@
 'use strict';
 
-const { fillPrompt, loadPrompt } = require('../lib/prompt-loader');
+const { fillPrompt } = require('../lib/prompt-loader');
 
 /**
  * @param {import('../lib/ollama-client').OllamaClient} client
@@ -11,7 +11,7 @@ async function verify(client, originalInsights, sourceText) {
     insights: JSON.stringify(originalInsights, null, 2)
   });
 
-  const response = await client.query(prompt, loadPrompt('verify.system'));
+  const response = await client.query(prompt);
 
   try {
     const jsonMatch = response.response.match(/\{[\s\S]*\}/);
