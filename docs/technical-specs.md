@@ -1,6 +1,6 @@
 # 技術仕様
 
-## 継続的LLM処理 (Infinite Loop)
+## LLM自律判断ループ
 
 ### イベント駆動
 
@@ -16,20 +16,45 @@
 | `idle` | キューが空になった時 | — |
 | `started` / `stopped` / `paused` / `resumed` | 状態変更時 | — |
 
-`idle` イベント発火時に `scheduleAutonomousTasks()` が呼ばれ、自律タスクを自動挿入する。
+`idle` イベント発火時に `scheduleAutonomousTasks()` が呼ばれ、LLMに次の行動を決定させる。
 
-### タスクスケジューリング
+### LLM自律行動計画
 
-各サイクルで以下のタスクがエンキューされる:
+各サイクルで `autonomous:plan` タスクが1つエンキューされる。LLMが現在の状態（サイクル数、知識数、モジュール数、訪問URL数、直近のアクティビティ等）を分析し、以下の7アクションから最適な行動を選択する:
 
-| タスク | 頻度 | 説明 |
-|-------|------|------|
-| `agent:research` | 毎サイクル | Web検索・情報収集・要約 |
-| `agent:analyze` | 60サイクル毎 | コードベース解析（約1時間に1回） |
-| `generate:module` | 毎サイクル | 蓄積知識からモジュール生成 |
-| `self:improve` | 毎サイクル | targetFolders内コードの改善 |
+| アクション | 説明 |
+|-----------|------|
+| `research` | ユーザー指定＋LLM自律プロンプトによるWeb検索・情報収集 |
+| `deep_research` | 特定トピックに絞った深掘り調査 |
+| `organize` | 知識DBの圧縮・整理（エントリ数>20のファイルが対象） |
+| `generate_script` | 蓄積知識からNode.jsモジュール生成 |
+| `analyze_code` | targetFolders内のコードベース解析 |
+| `improve_code` | targetFolders内コードのリファクタリング |
+| `idle` | 次のサイクルまで待機 |
 
-`taskInterval`（デフォルト60秒）× 60 = 約1時間でコード解析が1回実行される。
+### 2層検索プロンプト
+
+| プロンプト | 永続化 | 更新トリガー |
+|-----------|--------|------------|
+| `searchPrompt` | `settings.json` に保存 | ユーザーのチャットからリサーチ意図を検出時 |
+| `autoSearchPrompt` | メモリ上のみ | リサーチ完了後にLLMが次の探索方向を決定時 |
+
+### Activity Phase Tracking
+
+`activityPhase` オブジェクト (`{ phase, detail, startedAt }`) で現在の処理フェーズを追跡:
+
+| フェーズ | 説明 |
+|---------|------|
+| `planning` | LLMが次の行動を決定中 |
+| `searching` | Web検索・情報収集中 |
+| `saving` | リサーチ結果の保存中 |
+| `organizing` | 知識DBの圧縮・整理中 |
+| `generating` | スクリプト生成中 |
+| `analyzing` | コードベース解析中 |
+| `improving` | コード改善中 |
+| `idle` | 待機中 |
+
+`/status` APIの `activity` フィールドで公開され、UIのアクティビティバーに表示される。
 
 ### 割り込み処理
 
@@ -45,20 +70,31 @@
 ### Gather Phase
 
 1. LLM に検索クエリを生成させる（3〜5個）
+   - `visitedNote`: 訪問済みURLリストを渡し重複回避
+   - `similarNote`: 類似トピック検出時に分岐を促す
 2. 各クエリで Web 検索（Brave → DDG フォールバック）
-3. 上位結果のページを HTTP フェッチしてテキスト抽出
+3. 上位結果のページを HTTP フェッチしてテキスト抽出（訪問済みURLはスキップ）
 4. arxiv API で学術論文を検索（英語クエリのみ）
-5. 収集データを LLM に渡して「もっと調べるか」判断
+5. 新規訪問URLを収集して返却
 
 ### Summarize Phase
 
-収集した全データを LLM に渡し、以下を構造化抽出:
+収集した全データを LLM に渡し、構造化抽出:
 
-- **課題** (issues)
-- **行動** (actions)
-- **残課題** (remaining)
-- **可能性** (possibilities)
 - **要約** (summary)
+- **インサイト** (insights)
+- **情報源** (sources)
+
+データ未収集時（中断含む）は `{ empty: true }` を返し、知識DBへの保存をスキップする。
+
+## スマートチャット
+
+1. ユーザーの質問を受信
+2. 直近72時間の知識DB（research + analysis、最大10件）をコンテキストとして付与
+3. LLMで即座に回答を生成・返却
+4. バックグラウンドで以下をfire-and-forget実行:
+   - `detectAndUpdateSearchPrompt`: リサーチ意図の検出と `searchPrompt` 更新
+   - `supplementChatWithSearch`: 回答の十分性をチェックし、不十分なら追加検索を実行
 
 ## Web検索エンジン (searcher.js)
 
@@ -109,6 +145,33 @@
   "urls": ["http://localhost:11434", "http://backup:11434"]
 }
 ```
+
+## 知識DB管理
+
+### 分離ストレージ
+
+| ディレクトリ | 用途 | カテゴリ |
+|------------|------|---------|
+| `brain/research/` | Web検索・リサーチ結果 | research, dreams |
+| `brain/analysis/` | コードベース解析結果 | analysis |
+
+各エントリのJSONL形式:
+```json
+{"timestamp":"...","topic":"...","insights":["..."],"summary":"..."}
+```
+
+### 訪問URL追跡
+
+- `brain/visited-urls.json` にJSON配列として保存
+- `loadVisitedUrls()` / `addVisitedUrls()` で読み書き
+- エージェントループで自動スキップ、新しい情報源を優先探索
+
+### 知識圧縮 (compressKnowledge)
+
+- エントリ数が20を超えたJSONLファイルを対象
+- LLMが重複・類似エントリを統合
+- `compress-knowledge.system/user` プロンプトを使用
+- `organize` アクション実行時に research/analysis 両方を処理
 
 ## 逐次自己解析 (Sequential Summary)
 
@@ -170,6 +233,17 @@
 - `node --no-warnings -c <file>` で構文チェック
 - 子プロセスとして実行（サンドボックス外）
 
+## スクリプトレビュー (evolution.js: reviewScripts)
+
+Dream Phase で1日1回実行:
+
+1. `brain/modules/` 内の全 `.js` ファイルを走査
+2. 各ファイルに対し `validateSyntax` + `runInSandbox` で検証
+3. 結果リストをLLMに送信（`review-scripts.system` プロンプト使用）
+4. LLMが各ファイルについて `keep: true/false` と理由を返却
+5. `keep: false` のファイルを自動削除（`.summary.json` も含む）
+6. 削除があればGitで自動コミット
+
 ## モジュール生成 (evolution.js)
 
 ### generateModule()
@@ -195,9 +269,10 @@
 1. `setTimeout` で毎日 AM 5:00 にスケジュール
 2. `getRecentCommits()` で直近24時間のコミットを取得
 3. `getDiff()` で各コミットの差分を取得（上限10件、各2000文字）
-4. `getNewKnowledge()` で knowledge-db の新規エントリを収集
+4. `getNewKnowledge()` で knowledge-db の新規エントリを収集（research + analysis）
 5. Ollama にまとめて分析依頼
-6. 結果を `knowledge-db/dreams.jsonl` に追記
+6. 結果を `brain/research/dreams.jsonl` に追記
+7. スクリプトレビューを実行し不要なスクリプトを削除
 
 ### ハルシネーション抑制
 
@@ -260,15 +335,29 @@
 
 | メソッド | パス | 説明 |
 |---------|------|------|
-| `GET` | `/status` | システム状態（タスク、Ollama、知識DB、最終コミット） |
+| `GET` | `/status` | システム状態（タスク、Ollama、知識DB、最終コミット、現在のアクティビティフェーズ） |
 | `GET` | `/logs?count=N` | 直近N件のログ（デフォルト50件、最大保持500件） |
 | `POST` | `/analyze` | フォルダ解析タスクをキュー先頭に挿入 |
-| `POST` | `/chat` | LLMとの対話（知識DBコンテキスト付き） |
-| `GET` | `/knowledge?count=N&category=X` | 知識DBエントリの取得 |
+| `POST` | `/chat` | LLMとの対話（知識DBコンテキスト付き、補足検索あり） |
+| `GET` | `/knowledge?count=N&category=X&source=Y` | 知識DBエントリの取得（source: research/analysis） |
 
 ### UI サーバー
 
 `ui/server.js` が Express ベースのダッシュボードUIを提供（デフォルトポート: 3001）。
+
+### UI構成
+
+5タブ構成のフルスクリーンダッシュボード:
+
+| タブ | 機能 |
+|-----|------|
+| Chat | LLMとの対話（Markdown対応）|
+| Summary | リサーチ結果の要約・インサイト一覧（10秒自動更新）|
+| Knowledge DB | insightsのキーワード検索（AND検索、10秒自動更新）|
+| Logs | システムログのリアルタイム表示（5秒自動更新）|
+| Status | サーバー・Ollama・知識DB・最終コミットの詳細状態（5秒自動更新）|
+
+ヘッダーにミニステータス（状態・稼働時間・エントリ数）、アクティビティバーで現在の処理フェーズをリアルタイム表示。
 
 ## 設定ファイル (`config/settings.json`)
 
@@ -281,6 +370,5 @@
 | `targetFolders` | string[] | `["./brain/modules"]` | 自己解析・自動編集の対象フォルダ |
 | `dreamHour` | number | `5` | Dream Phase の実行時刻（時） |
 | `taskInterval` | number | `60000` | 自律タスクの間隔（ミリ秒） |
-| `knowledgeDb` | string | `./brain/knowledge-db` | 知識DB のパス |
 | `summaryExtension` | string | `.summary.json` | 要約ファイルの拡張子 |
-| `searchPrompt` | string | (リサーチ指示) | デフォルトのリサーチプロンプト |
+| `searchPrompt` | string | (リサーチ指示) | ユーザー指定のリサーチプロンプト（LLMがチャットから自動更新可能） |

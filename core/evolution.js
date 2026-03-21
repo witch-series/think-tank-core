@@ -135,7 +135,30 @@ function getNewKnowledge(knowledgeDbPath, hours = 24) {
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
+        entry._category = file.replace('.jsonl', '');
         if (entry.timestamp && new Date(entry.timestamp).getTime() > since) entries.push(entry);
+      } catch {}
+    }
+  }
+  return entries;
+}
+
+/**
+ * Get all knowledge entries from a directory (no time filter).
+ */
+function getAllKnowledge(knowledgeDbPath) {
+  const entries = [];
+  let files;
+  try { files = fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
+  catch { return entries; }
+
+  for (const file of files) {
+    const lines = fs.readFileSync(path.join(knowledgeDbPath, file), 'utf-8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        entry._category = file.replace('.jsonl', '');
+        entries.push(entry);
       } catch {}
     }
   }
@@ -150,6 +173,60 @@ function saveKnowledge(knowledgeDbPath, category, data) {
   const safeJson = sanitizeText(JSON.stringify(entry));
   fs.appendFileSync(filePath, safeJson + '\n', 'utf-8');
   return JSON.parse(safeJson);
+}
+
+// --- Knowledge compression ---
+
+const COMPRESS_THRESHOLD = 20; // Compress when entries exceed this count
+
+async function compressKnowledge(client, knowledgeDbPath) {
+  let files;
+  try { files = fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
+  catch { return { skipped: true }; }
+
+  const results = [];
+
+  for (const file of files) {
+    const filePath = path.join(knowledgeDbPath, file);
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+    if (lines.length < COMPRESS_THRESHOLD) continue;
+
+    const entries = [];
+    for (const line of lines) {
+      try { entries.push(JSON.parse(line)); } catch {}
+    }
+
+    // Build entries text for LLM
+    const entriesText = entries.map((e, i) =>
+      `### Entry ${i + 1}\nTopic: ${e.topic || 'unknown'}\nInsights: ${JSON.stringify(e.insights || [])}`
+    ).join('\n\n');
+
+    const prompt = fillPrompt('compress-knowledge.user', {
+      entryCount: String(entries.length),
+      entries: entriesText.slice(0, 8000)
+    });
+
+    try {
+      const response = await client.query(prompt, loadPrompt('compress-knowledge.system'));
+      const text = (response.response || '').trim();
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) continue;
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!parsed.entries || !Array.isArray(parsed.entries)) continue;
+
+      // Rewrite the JSONL file with compressed entries
+      const compressed = parsed.entries.map(e => {
+        const safe = sanitizeText(JSON.stringify({ ...e, timestamp: new Date().toISOString() }));
+        return safe;
+      }).join('\n') + '\n';
+
+      fs.writeFileSync(filePath, compressed, 'utf-8');
+      results.push({ file, before: entries.length, after: parsed.entries.length });
+    } catch {}
+  }
+
+  return { compressed: results };
 }
 
 // --- Autonomous question generation ---
@@ -176,10 +253,10 @@ async function generateNextQuestion(client, context) {
 // --- Dream Phase ---
 
 async function dreamPhase(client, config, repoPath) {
-  const knowledgeDbPath = path.resolve(repoPath, config.knowledgeDb);
-
   const commits = await getRecentCommits(repoPath);
-  const knowledge = getNewKnowledge(knowledgeDbPath);
+  const researchKnowledge = getNewKnowledge(path.resolve(repoPath, 'brain', 'research'));
+  const analysisKnowledge = getNewKnowledge(path.resolve(repoPath, 'brain', 'analysis'));
+  const knowledge = [...researchKnowledge, ...analysisKnowledge];
 
   const diffs = [];
   for (const commit of commits.slice(0, 10)) {
@@ -391,10 +468,78 @@ async function chat(client, userMessage, context) {
   return response.response;
 }
 
+// --- Script review and cleanup ---
+
+async function reviewScripts(client, modulesDir) {
+  if (!fs.existsSync(modulesDir)) return { reviewed: 0, deleted: 0 };
+
+  const files = fs.readdirSync(modulesDir).filter(f => f.endsWith('.js'));
+  if (files.length === 0) return { reviewed: 0, deleted: 0 };
+
+  // Build summaries for LLM review
+  const scriptSummaries = [];
+  for (const file of files) {
+    const filePath = path.join(modulesDir, file);
+    try {
+      const code = fs.readFileSync(filePath, 'utf-8');
+      const syntaxCheck = validateSyntax(code);
+      const sandbox = await runInSandbox(code);
+
+      scriptSummaries.push({
+        file,
+        lines: code.split('\n').length,
+        syntaxValid: syntaxCheck.valid,
+        runsInSandbox: sandbox.success,
+        sandboxError: sandbox.error || null,
+        preview: code.slice(0, 300)
+      });
+    } catch (e) {
+      scriptSummaries.push({ file, error: e.message });
+    }
+  }
+
+  // Ask LLM to review
+  const prompt = `以下の${files.length}個のスクリプトを精査してください。\n\n` +
+    scriptSummaries.map(s =>
+      `### ${s.file}\n` +
+      (s.error ? `エラー: ${s.error}\n` :
+        `行数: ${s.lines}, 構文: ${s.syntaxValid ? 'OK' : 'NG'}, 実行: ${s.runsInSandbox ? 'OK' : 'NG'}${s.sandboxError ? ` (${s.sandboxError.slice(0, 80)})` : ''}\n` +
+        `\`\`\`\n${s.preview}\n\`\`\`\n`)
+    ).join('\n');
+
+  let deleted = 0;
+  try {
+    const response = await client.query(prompt, loadPrompt('review-scripts.system'));
+    const text = (response.response || '').trim();
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { reviewed: files.length, deleted: 0 };
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed.reviews || !Array.isArray(parsed.reviews)) return { reviewed: files.length, deleted: 0 };
+
+    for (const review of parsed.reviews) {
+      if (!review.keep && review.file) {
+        const filePath = path.join(modulesDir, review.file);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          // Also remove .summary.json if it exists
+          const summaryPath = filePath.replace(/\.js$/, '.summary.json');
+          if (fs.existsSync(summaryPath)) fs.unlinkSync(summaryPath);
+          deleted++;
+        }
+      }
+    }
+
+    return { reviewed: files.length, deleted, reviews: parsed.reviews };
+  } catch {
+    return { reviewed: files.length, deleted: 0 };
+  }
+}
+
 module.exports = {
   getRecentCommits, getLastCommit, getDiff, autoCommit,
-  getNewKnowledge, saveKnowledge,
-  generateNextQuestion, dreamPhase,
+  getNewKnowledge, getAllKnowledge, saveKnowledge, compressKnowledge,
+  generateNextQuestion, dreamPhase, reviewScripts,
   proposeRefactor, applyRefactor,
   sanitizeText, containsSensitiveData,
   generateModule, chat

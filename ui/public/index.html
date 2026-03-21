@@ -6,43 +6,57 @@
   <title>Think Tank Core</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Consolas', 'Monaco', monospace; background: #0a0a0a; color: #e0e0e0; padding: 16px; }
-    h1 { font-size: 18px; color: #8be9fd; margin-bottom: 16px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
-    .card { background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px; }
-    .card h2 { font-size: 13px; color: #bd93f9; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
-    .card.full { grid-column: 1 / -1; }
-    .stat { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #222; font-size: 13px; }
-    .stat:last-child { border-bottom: none; }
-    .stat .label { color: #888; }
-    .stat .value { color: #f8f8f2; }
+    html, body { height: 100%; overflow: hidden; }
+    body { font-family: 'Consolas', 'Monaco', monospace; background: #0a0a0a; color: #e0e0e0; display: flex; flex-direction: column; }
+
+    /* Header */
+    .header { padding: 10px 16px; display: flex; align-items: center; gap: 8px; flex-shrink: 0; border-bottom: 1px solid #222; }
+    .header h1 { font-size: 16px; color: #8be9fd; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+    .dot.ok { background: #50fa7b; }
+    .dot.err { background: #ff5555; }
+    .header-status { font-size: 11px; color: #666; margin-left: auto; }
+    .activity-bar { padding: 4px 16px; font-size: 12px; color: #f1fa8c; background: #1a1a2e; border-bottom: 1px solid #222; flex-shrink: 0; display: none; align-items: center; gap: 8px; }
+    .activity-bar.active { display: flex; }
+    .activity-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #444; border-top-color: #f1fa8c; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .activity-label { color: #bd93f9; font-weight: bold; text-transform: uppercase; font-size: 11px; }
+    .activity-detail { color: #ccc; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 0; padding: 0 16px; flex-shrink: 0; background: #0a0a0a; border-bottom: 1px solid #333; }
+    .tab { padding: 8px 20px; font-size: 13px; background: #111; border: 1px solid #333; border-bottom: none; cursor: pointer; color: #888; border-radius: 4px 4px 0 0; margin-bottom: -1px; }
+    .tab.active { background: #1a1a2e; color: #bd93f9; border-bottom-color: #1a1a2e; }
+    .tab:hover:not(.active) { color: #ccc; }
+
+    /* Tab content */
+    .tab-body { flex: 1; overflow: hidden; background: #1a1a2e; border: 1px solid #333; border-top: none; margin: 0 16px 12px; border-radius: 0 0 6px 6px; display: flex; flex-direction: column; }
+    .tab-content { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+    .tab-content.active { display: flex; }
+
+    /* Badge */
     .badge { display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px; }
     .badge.running { background: #1a472a; color: #50fa7b; }
     .badge.paused { background: #4a3a1a; color: #f1fa8c; }
     .badge.stopped { background: #4a1a1a; color: #ff5555; }
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-    .dot.ok { background: #50fa7b; }
-    .dot.err { background: #ff5555; }
-    .queue-list { font-size: 12px; }
-    .queue-list li { padding: 3px 0; color: #ccc; list-style: none; }
-    .queue-list li::before { content: '▸ '; color: #6272a4; }
-    #logs { max-height: 300px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
-    .log-entry { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+
+    /* Stat rows */
+    .stat { display: flex; justify-content: space-between; padding: 6px 16px; border-bottom: 1px solid #222; font-size: 13px; }
+    .stat:last-child { border-bottom: none; }
+    .stat .label { color: #888; }
+    .stat .value { color: #f8f8f2; }
+
+    /* Logs */
+    .log-scroll { flex: 1; overflow-y: auto; padding: 8px 16px; }
+    .log-entry { padding: 1px 0; white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.6; }
     .log-entry.error { color: #ff5555; }
     .log-entry.warn { color: #f1fa8c; }
     .log-entry.info { color: #ccc; }
     .log-entry.debug { color: #6272a4; }
 
-    /* Tabs */
-    .tabs { display: flex; gap: 0; margin-bottom: 0; }
-    .tab { padding: 6px 16px; font-size: 12px; background: #111; border: 1px solid #333; border-bottom: none; cursor: pointer; color: #888; border-radius: 4px 4px 0 0; }
-    .tab.active { background: #1a1a2e; color: #bd93f9; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
-
     /* Chat */
-    .chat-area { max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
-    .chat-msg { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; line-height: 1.5; }
+    .chat-area { flex: 1; overflow-y: auto; padding: 12px 16px; }
+    .chat-msg { padding: 6px 0; border-bottom: 1px solid #222; font-size: 13px; line-height: 1.5; }
     .chat-msg.user { color: #8be9fd; }
     .chat-msg.assistant { color: #f8f8f2; }
     .chat-msg .role-label { font-weight: bold; }
@@ -60,46 +74,62 @@
     .chat-msg .md-body th, .chat-msg .md-body td { border: 1px solid #444; padding: 4px 8px; font-size: 12px; }
     .chat-msg .md-body th { background: #282a36; }
     .chat-msg.thinking { color: #6272a4; font-style: italic; }
-    .chat-input { display: flex; gap: 8px; }
+    .chat-input { display: flex; gap: 8px; padding: 8px 16px; border-top: 1px solid #333; flex-shrink: 0; }
     .chat-input input { flex: 1; background: #111; border: 1px solid #333; color: #f8f8f2; padding: 8px; font-family: inherit; font-size: 13px; border-radius: 4px; }
     .chat-input input:focus { outline: none; border-color: #bd93f9; }
     .chat-input button { background: #44475a; color: #f8f8f2; border: 1px solid #555; padding: 8px 16px; cursor: pointer; font-family: inherit; font-size: 13px; border-radius: 4px; }
     .chat-input button:hover { background: #6272a4; }
     .chat-input button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    /* Knowledge */
-    .knowledge-list { max-height: 400px; overflow-y: auto; }
-    .k-entry { background: #111; border: 1px solid #222; border-radius: 4px; padding: 8px; margin-bottom: 6px; font-size: 12px; }
+    /* Knowledge / Summary entries */
+    .k-scroll { flex: 1; overflow-y: auto; padding: 12px 16px; }
+    .k-entry { background: #111; border: 1px solid #222; border-radius: 4px; padding: 10px; margin-bottom: 8px; font-size: 12px; }
     .k-entry .k-topic { color: #8be9fd; font-weight: bold; margin-bottom: 4px; }
     .k-entry .k-category { color: #bd93f9; font-size: 11px; float: right; }
     .k-entry .k-time { color: #6272a4; font-size: 11px; }
-    .k-entry .k-body { color: #ccc; margin-top: 4px; white-space: pre-wrap; word-break: break-all; }
+    .k-entry .k-body { color: #ccc; margin-top: 6px; white-space: pre-wrap; word-break: break-all; }
 
-    .footer { text-align: center; padding: 12px; font-size: 11px; color: #555; }
+    /* Search bar */
+    .search-bar { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #333; flex-shrink: 0; }
+    .search-bar input { flex: 1; background: #111; border: 1px solid #333; color: #f8f8f2; padding: 8px; font-family: inherit; font-size: 13px; border-radius: 4px; }
+    .search-bar input:focus { outline: none; border-color: #bd93f9; }
+    .search-bar button { background: #44475a; color: #f8f8f2; border: 1px solid #555; padding: 8px 16px; cursor: pointer; font-family: inherit; font-size: 13px; border-radius: 4px; }
+    .search-bar button:hover { background: #6272a4; }
+    .search-bar .result-count { font-size: 11px; color: #6272a4; align-self: center; white-space: nowrap; }
+
+    /* Status tab */
+    .status-scroll { flex: 1; overflow-y: auto; }
+    .status-section { padding: 12px 16px; border-bottom: 1px solid #222; }
+    .status-section h3 { font-size: 12px; color: #bd93f9; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+    /* Empty state */
+    .empty { color: #666; padding: 20px; text-align: center; font-size: 13px; }
   </style>
 </head>
 <body>
-  <h1><span class="dot" id="conn"></span>Think Tank Core Dashboard</h1>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Server Status</h2>
-      <div id="status-body">Connecting...</div>
-    </div>
-    <div class="card">
-      <h2>Task Queue</h2>
-      <div id="queue-body">&mdash;</div>
-    </div>
+  <div class="header">
+    <span class="dot" id="conn"></span>
+    <h1>Think Tank Core</h1>
+    <span class="header-status" id="header-status"></span>
   </div>
 
-  <div class="card full" style="margin-bottom:12px">
-    <div class="tabs">
-      <div class="tab active" data-tab="chat">Chat</div>
-      <div class="tab" data-tab="knowledge">Knowledge DB</div>
-      <div class="tab" data-tab="logs">Logs</div>
-    </div>
+  <div class="activity-bar" id="activity-bar">
+    <span class="activity-spinner"></span>
+    <span class="activity-label" id="activity-phase"></span>
+    <span class="activity-detail" id="activity-detail"></span>
+  </div>
 
-    <div id="tab-chat" class="tab-content active" style="padding-top:12px">
+  <div class="tabs">
+    <div class="tab active" data-tab="chat">Chat</div>
+    <div class="tab" data-tab="summary">Summary</div>
+    <div class="tab" data-tab="knowledge">Knowledge DB</div>
+    <div class="tab" data-tab="logs">Logs</div>
+    <div class="tab" data-tab="status">Status</div>
+  </div>
+
+  <div class="tab-body">
+    <!-- Chat -->
+    <div id="tab-chat" class="tab-content active">
       <div class="chat-area" id="chat-area"></div>
       <div class="chat-input">
         <input type="text" id="chat-input" placeholder="メッセージを入力..." />
@@ -107,16 +137,33 @@
       </div>
     </div>
 
-    <div id="tab-knowledge" class="tab-content" style="padding-top:12px">
-      <div class="knowledge-list" id="knowledge-list">Loading...</div>
+    <!-- Summary (insights/summaries from research) -->
+    <div id="tab-summary" class="tab-content">
+      <div class="k-scroll" id="summary-list"><div class="empty">Loading...</div></div>
     </div>
 
-    <div id="tab-logs" class="tab-content" style="padding-top:12px">
-      <div id="logs"></div>
+    <!-- Knowledge DB (searchable raw data) -->
+    <div id="tab-knowledge" class="tab-content">
+      <div class="search-bar">
+        <input type="text" id="kb-search" placeholder="キーワードで検索..." />
+        <button id="kb-search-btn">Search</button>
+        <span class="result-count" id="kb-count"></span>
+      </div>
+      <div class="k-scroll" id="knowledge-list"><div class="empty">検索キーワードを入力するか、空欄で全件表示</div></div>
+    </div>
+
+    <!-- Logs -->
+    <div id="tab-logs" class="tab-content">
+      <div class="log-scroll" id="logs"></div>
+    </div>
+
+    <!-- Status -->
+    <div id="tab-status" class="tab-content">
+      <div class="status-scroll" id="status-body">
+        <div class="empty">Connecting...</div>
+      </div>
     </div>
   </div>
-
-  <div class="footer">Auto-refresh: 5s</div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
@@ -127,7 +174,6 @@
       marked.setOptions({ breaks: true, gfm: true });
     }
     function sanitizeHtml(html) {
-      // Remove script tags, event handlers, and dangerous attributes
       return html
         .replace(/<script[\s\S]*?<\/script>/gi, '')
         .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
@@ -149,7 +195,8 @@
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        if (tab.dataset.tab === 'knowledge') fetchKnowledge();
+        if (tab.dataset.tab === 'summary') fetchSummary();
+        if (tab.dataset.tab === 'knowledge') fetchKnowledgeDB();
       });
     });
 
@@ -177,31 +224,69 @@
         const tm = data.taskManager;
         const state = tm.paused ? 'paused' : tm.running ? 'running' : 'stopped';
         document.getElementById('conn').className = 'dot ok';
-        document.getElementById('status-body').innerHTML = [
-          '<div class="stat"><span class="label">State</span><span class="value">' + badge(state) + '</span></div>',
-          '<div class="stat"><span class="label">Current Task</span><span class="value">' + esc(tm.currentTask || '\u2014') + '</span></div>',
-          '<div class="stat"><span class="label">Queue</span><span class="value">' + tm.queueLength + ' tasks</span></div>',
-          '<div class="stat"><span class="label">Uptime</span><span class="value">' + formatUptime(data.uptime) + '</span></div>',
-          '<div class="stat"><span class="label">Knowledge</span><span class="value">' + data.knowledge.entries + ' entries</span></div>',
-          '<div class="stat"><span class="label">Last Commit</span><span class="value">' + esc(data.lastCommit ? data.lastCommit.message : '\u2014') + '</span></div>',
-        ].join('');
 
-        if (tm.queuedTasks.length === 0) {
-          document.getElementById('queue-body').innerHTML = '<span style="color:#666">Empty</span>';
+        // Header mini-status
+        document.getElementById('header-status').textContent =
+          state.toUpperCase() + ' | ' + formatUptime(data.uptime) + ' | ' + data.knowledge.entries + ' entries';
+
+        // Activity bar
+        const bar = document.getElementById('activity-bar');
+        const act = data.activity || {};
+        if (act.phase && act.phase !== 'idle') {
+          bar.classList.add('active');
+          const phaseLabels = {
+            planning: 'Planning', searching: 'Searching', saving: 'Saving',
+            organizing: 'Organizing', generating: 'Generating', analyzing: 'Analyzing',
+            improving: 'Improving', research: 'Research', deep_research: 'Deep Research',
+            analyze_code: 'Analyzing', improve_code: 'Improving', generate_script: 'Generating'
+          };
+          document.getElementById('activity-phase').textContent = phaseLabels[act.phase] || act.phase;
+          document.getElementById('activity-detail').textContent = act.detail || '';
         } else {
-          document.getElementById('queue-body').innerHTML =
-            '<ul class="queue-list">' + tm.queuedTasks.map(function(t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>';
+          bar.classList.remove('active');
         }
+
+        // Full status tab
+        document.getElementById('status-body').innerHTML =
+          '<div class="status-section">' +
+            '<h3>Server</h3>' +
+            '<div class="stat"><span class="label">State</span><span class="value">' + badge(state) + '</span></div>' +
+            '<div class="stat"><span class="label">Uptime</span><span class="value">' + formatUptime(data.uptime) + '</span></div>' +
+            '<div class="stat"><span class="label">Current Task</span><span class="value">' + esc(tm.currentTask || '\u2014') + '</span></div>' +
+            '<div class="stat"><span class="label">Activity</span><span class="value">' + esc(act.phase && act.phase !== 'idle' ? act.phase + (act.detail ? ': ' + act.detail : '') : '\u2014') + '</span></div>' +
+            '<div class="stat"><span class="label">Queue</span><span class="value">' + tm.queueLength + ' tasks</span></div>' +
+          '</div>' +
+          '<div class="status-section">' +
+            '<h3>Ollama</h3>' +
+            (data.ollama ? (
+              '<div class="stat"><span class="label">URL</span><span class="value">' + esc(data.ollama.currentUrl || '\u2014') + '</span></div>' +
+              '<div class="stat"><span class="label">Model</span><span class="value">' + esc(data.ollama.model || '\u2014') + '</span></div>' +
+              '<div class="stat"><span class="label">Fail Count</span><span class="value">' + (data.ollama.failCount || 0) + '</span></div>' +
+              '<div class="stat"><span class="label">URLs</span><span class="value">' + esc((data.ollama.urls || []).join(', ')) + '</span></div>'
+            ) : '<div class="stat"><span class="label">Status</span><span class="value">Not connected</span></div>') +
+          '</div>' +
+          '<div class="status-section">' +
+            '<h3>Knowledge DB</h3>' +
+            '<div class="stat"><span class="label">Files</span><span class="value">' + data.knowledge.files + '</span></div>' +
+            '<div class="stat"><span class="label">Entries</span><span class="value">' + data.knowledge.entries + '</span></div>' +
+          '</div>' +
+          '<div class="status-section">' +
+            '<h3>Last Commit</h3>' +
+            '<div class="stat"><span class="label">Message</span><span class="value">' + esc(data.lastCommit ? data.lastCommit.message : '\u2014') + '</span></div>' +
+            (data.lastCommit ? '<div class="stat"><span class="label">Date</span><span class="value">' + esc(data.lastCommit.date || '') + '</span></div>' : '') +
+          '</div>';
       } catch {
         document.getElementById('conn').className = 'dot err';
-        document.getElementById('status-body').innerHTML = '<span style="color:#ff5555">Connection failed</span>';
+        document.getElementById('header-status').textContent = 'OFFLINE';
+        document.getElementById('activity-bar').classList.remove('active');
+        document.getElementById('status-body').innerHTML = '<div class="empty" style="color:#ff5555">Connection failed</div>';
       }
     }
 
     // --- Logs ---
     async function fetchLogs() {
       try {
-        const res = await fetch(apiUrl + '/logs?count=100');
+        const res = await fetch(apiUrl + '/logs?count=200');
         const data = await res.json();
         const container = document.getElementById('logs');
         const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
@@ -268,33 +353,112 @@
       if (e.key === 'Enter') sendChat();
     });
 
-    // --- Knowledge DB ---
-    async function fetchKnowledge() {
+    // --- Summary (insights/summaries) ---
+    async function fetchSummary() {
       try {
         const res = await fetch(apiUrl + '/knowledge?count=50');
         const data = await res.json();
-        const container = document.getElementById('knowledge-list');
+        const container = document.getElementById('summary-list');
         if (data.length === 0) {
-          container.innerHTML = '<span style="color:#666">No entries yet</span>';
+          container.innerHTML = '<div class="empty">No entries yet</div>';
           return;
         }
         container.innerHTML = data.map(function(e) {
           const time = e.timestamp ? e.timestamp.replace('T', ' ').split('.')[0] : '';
           const topic = e.topic || e._category || 'unknown';
-          const body = e.insights
-            ? JSON.stringify(e.insights, null, 2)
-            : (e.analysis ? JSON.stringify(e.analysis, null, 2).slice(0, 500) : JSON.stringify(e, null, 2).slice(0, 300));
+
+          // Build body: prefer summary text, then insights, then raw
+          let body = '';
+          if (e.summary && e.summary.length > 10) {
+            body = e.summary;
+          } else if (e.insights && e.insights.length > 0) {
+            body = JSON.stringify(e.insights, null, 2);
+          } else if (e.analysis) {
+            body = JSON.stringify(e.analysis, null, 2).slice(0, 500);
+          } else {
+            body = JSON.stringify(e, null, 2).slice(0, 300);
+          }
+
           return '<div class="k-entry">' +
-            '<span class="k-category">' + esc(e._category) + '</span>' +
+            '<span class="k-category">' + esc(e._category || '') + '</span>' +
             '<div class="k-topic">' + esc(topic) + '</div>' +
             '<div class="k-time">' + esc(time) + '</div>' +
             '<div class="k-body">' + renderMd(body) + '</div>' +
             '</div>';
         }).join('');
       } catch {
-        document.getElementById('knowledge-list').innerHTML = '<span style="color:#ff5555">Failed to load</span>';
+        document.getElementById('summary-list').innerHTML = '<div class="empty" style="color:#ff5555">Failed to load</div>';
       }
     }
+
+    // --- Knowledge DB (searchable) ---
+    let allKnowledgeData = [];
+
+    async function fetchKnowledgeDB() {
+      try {
+        const res = await fetch(apiUrl + '/knowledge?count=500');
+        allKnowledgeData = await res.json();
+        // Re-apply current search filter if any
+        const query = document.getElementById('kb-search').value.trim();
+        if (query) {
+          searchKnowledge();
+        } else {
+          renderKnowledge(allKnowledgeData);
+        }
+      } catch {
+        document.getElementById('knowledge-list').innerHTML = '<div class="empty" style="color:#ff5555">Failed to load</div>';
+      }
+    }
+
+    function searchKnowledge() {
+      const query = document.getElementById('kb-search').value.trim().toLowerCase();
+      if (!query) {
+        renderKnowledge(allKnowledgeData);
+        return;
+      }
+      const keywords = query.split(/\s+/);
+      const filtered = allKnowledgeData.filter(function(e) {
+        const text = JSON.stringify(e).toLowerCase();
+        return keywords.every(function(kw) { return text.indexOf(kw) !== -1; });
+      });
+      renderKnowledge(filtered);
+    }
+
+    function renderKnowledge(data) {
+      const container = document.getElementById('knowledge-list');
+      const countEl = document.getElementById('kb-count');
+      countEl.textContent = data.length + ' entries';
+
+      if (data.length === 0) {
+        container.innerHTML = '<div class="empty">No matching entries</div>';
+        return;
+      }
+
+      container.innerHTML = data.map(function(e) {
+        const time = e.timestamp ? e.timestamp.replace('T', ' ').split('.')[0] : '';
+        const topic = e.topic || e._category || 'unknown';
+
+        // Show only insights
+        let body = '';
+        if (Array.isArray(e.insights) && e.insights.length > 0) {
+          body = JSON.stringify(e.insights, null, 2);
+        } else {
+          return ''; // Skip entries without insights
+        }
+
+        return '<div class="k-entry">' +
+          '<span class="k-category">' + esc(e._category || '') + '</span>' +
+          '<div class="k-topic">' + esc(topic) + '</div>' +
+          '<div class="k-time">' + esc(time) + '</div>' +
+          '<div class="k-body">' + esc(body) + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    document.getElementById('kb-search-btn').addEventListener('click', searchKnowledge);
+    document.getElementById('kb-search').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') searchKnowledge();
+    });
 
     // --- Init ---
     async function init() {
@@ -305,8 +469,12 @@
       } catch {}
       fetchStatus();
       fetchLogs();
+      fetchSummary();
+      fetchKnowledgeDB();
       setInterval(fetchStatus, 5000);
       setInterval(fetchLogs, 5000);
+      setInterval(fetchSummary, 10000);
+      setInterval(fetchKnowledgeDB, 10000);
     }
     init();
   </script>

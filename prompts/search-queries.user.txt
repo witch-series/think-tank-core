@@ -3,5 +3,9 @@
 
 テーマ: {{taskDescription}}
 
+{{visitedNote}}
+
+{{similarNote}}
+
 以下のJSON形式で返してください。JSONのみ出力してください。
 {"queries": ["検索クエリ1", "search query 2", "検索クエリ3"]}

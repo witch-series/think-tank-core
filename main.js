@@ -9,13 +9,15 @@ const {
   dreamPhase, proposeRefactor, applyRefactor,
   generateNextQuestion, getLastCommit,
   saveKnowledge, autoCommit, sanitizeText,
-  generateModule, chat, getNewKnowledge
+  generateModule, chat, getNewKnowledge, getAllKnowledge, compressKnowledge,
+  reviewScripts
 } = require('./core/evolution');
 const { doubleCheck } = require('./explorers/verifier');
 const { OllamaClient } = require('./lib/ollama-client');
 const { analyzeFolder, analyzeFolderWithLLM, scanDirectory } = require('./lib/analyzer');
 const { runAgentLoop } = require('./core/agent-loop');
 const { loadConfig } = require('./lib/configurator');
+const { loadPrompt, fillPrompt } = require('./lib/prompt-loader');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
@@ -52,9 +54,9 @@ let restarting = false;
 // --- Task Manager ---
 const taskManager = new TaskManager();
 
-taskManager.on('task:start', (task) => log('debug', `Task started: ${task.name}`));
-taskManager.on('task:complete', ({ task }) => log('debug', `Task completed: ${task.name}`));
-taskManager.on('task:error', ({ task, error }) => log('error', `Task failed: ${task.name} — ${error.message}`));
+taskManager.on('task:start', (task) => log('debug', `Task started: ${task?.name}`));
+taskManager.on('task:complete', ({ task }) => log('debug', `Task completed: ${task?.name}`));
+taskManager.on('task:error', ({ task, error }) => log('error', `Task failed: ${task?.name || 'unknown'} — ${error?.message}`));
 
 taskManager.on('idle', () => {
   if (idleTimer || restarting) return;
@@ -65,6 +67,145 @@ taskManager.on('idle', () => {
     if (!restarting) scheduleAutonomousTasks();
   }, interval);
 });
+
+// --- Helper: visited URL tracking ---
+const VISITED_URLS_PATH = path.join(ROOT, 'brain', 'visited-urls.json');
+
+function loadVisitedUrls() {
+  try {
+    if (fs.existsSync(VISITED_URLS_PATH)) {
+      return JSON.parse(fs.readFileSync(VISITED_URLS_PATH, 'utf-8'));
+    }
+  } catch {}
+  return [];
+}
+
+function saveVisitedUrls(urls) {
+  const dir = path.dirname(VISITED_URLS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(VISITED_URLS_PATH, JSON.stringify(urls, null, 2), 'utf-8');
+}
+
+function addVisitedUrls(newUrls) {
+  const existing = loadVisitedUrls();
+  const set = new Set(existing);
+  for (const url of newUrls) {
+    if (url && typeof url === 'string') set.add(url);
+  }
+  saveVisitedUrls([...set]);
+}
+
+// --- Helper: detect research intent from user chat and update searchPrompt ---
+// autoSearchPrompt: LLM autonomously decides what to explore next (not persisted to settings.json)
+let autoSearchPrompt = '';
+
+function detectAndUpdateSearchPrompt(client, userMessage) {
+  // Fire-and-forget — don't block the chat response
+  (async () => {
+    try {
+      const systemPrompt = loadPrompt('detect-research-intent.system');
+      const response = await client.query(userMessage, systemPrompt);
+      const text = (response.response || '').trim();
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed.isResearch && parsed.searchPrompt && parsed.searchPrompt !== 'null') {
+        // User's chat contains a research directive → update the user-facing searchPrompt
+        config.searchPrompt = parsed.searchPrompt;
+        log('info', `searchPrompt updated by user: "${parsed.searchPrompt.slice(0, 80)}"`);
+
+        // Persist to settings.json
+        try {
+          const settingsPath = path.join(ROOT, 'config', 'settings.json');
+          if (fs.existsSync(settingsPath)) {
+            const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+            settings.searchPrompt = parsed.searchPrompt;
+            fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+          }
+        } catch (e) {
+          log('warn', `Failed to persist searchPrompt: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      log('debug', `Research intent detection failed: ${e.message}`);
+    }
+  })();
+}
+
+// --- Helper: LLM autonomously updates its own search direction ---
+function updateAutoSearchPrompt(client, latestSummary, recentTopics) {
+  // Fire-and-forget
+  (async () => {
+    try {
+      const prompt = `直近のリサーチ結果:\n${(latestSummary || '').slice(0, 500)}\n\n最近のトピック:\n${(recentTopics || []).slice(-5).join(', ')}`;
+      const response = await client.query(prompt, loadPrompt('next-search-direction.system'));
+      const text = (response.response || '').trim();
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed.nextTopic && parsed.nextTopic.length > 5) {
+        autoSearchPrompt = parsed.nextTopic;
+        log('info', `Auto search direction: "${autoSearchPrompt.slice(0, 80)}"`);
+      }
+    } catch (e) {
+      log('debug', `Auto search direction update failed: ${e.message}`);
+    }
+  })();
+}
+
+// --- Helper: supplement chat with background search ---
+function supplementChatWithSearch(client, userMessage, initialReply, existingKnowledge) {
+  // Fire-and-forget: check if reply indicates insufficient knowledge, then search
+  (async () => {
+    try {
+      const checkPrompt = `以下の質問と回答を分析してください。回答に十分な情報が含まれていない、または「わかりません」「情報がありません」等の不確かな回答の場合はtrueを返してください。
+
+質問: ${userMessage.slice(0, 200)}
+回答: ${initialReply.slice(0, 300)}
+
+JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "検索クエリ（needsSearchがtrueの場合）"}`;
+
+      const response = await client.query(checkPrompt, 'JSONのみ出力してください。');
+      const text = (response.response || '').trim();
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return;
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!parsed.needsSearch || !parsed.searchQuery) return;
+
+      log('info', `Supplementing chat with search: "${parsed.searchQuery.slice(0, 60)}"`);
+
+      // Run a quick research loop
+      const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
+      const result = await runAgentLoop(client, parsed.searchQuery, ROOT, {
+        workLogDir, onLog: log, mode: 'research',
+        visitedUrls: loadVisitedUrls()
+      });
+
+      if (result.visitedUrls && result.visitedUrls.length > 0) {
+        addVisitedUrls(result.visitedUrls);
+      }
+
+      if (result.empty) return;
+
+      // Save the supplementary research
+      const hasData = (result.insights && result.insights.length > 0) ||
+                      (result.summary && result.summary.length > 10);
+      if (hasData) {
+        saveKnowledge(path.resolve(ROOT, 'brain', 'research'), 'research', {
+          topic: parsed.searchQuery.slice(0, 50),
+          insights: result.insights || [],
+          summary: result.summary || ''
+        });
+        log('info', `Supplementary research saved: ${(result.insights || []).length} insights for user query`);
+      }
+    } catch (e) {
+      log('debug', `Supplement search failed: ${e.message}`);
+    }
+  })();
+}
 
 // --- Helper: collect codebase context ---
 function collectContext() {
@@ -90,12 +231,13 @@ function collectContext() {
     }
   }
 
-  const dbPath = path.resolve(ROOT, config.knowledgeDb);
   let knowledgeCount = 0;
-  if (fs.existsSync(dbPath)) {
-    const dbFiles = fs.readdirSync(dbPath).filter(f => f.endsWith('.jsonl'));
-    for (const file of dbFiles) {
-      knowledgeCount += fs.readFileSync(path.join(dbPath, file), 'utf-8').split('\n').filter(Boolean).length;
+  for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
+    if (fs.existsSync(kbDir)) {
+      const dbFiles = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl'));
+      for (const file of dbFiles) {
+        knowledgeCount += fs.readFileSync(path.join(kbDir, file), 'utf-8').split('\n').filter(Boolean).length;
+      }
     }
   }
 
@@ -109,143 +251,227 @@ function collectContext() {
   };
 }
 
-// --- Autonomous Task Generation ---
+// --- Activity Phase Tracking ---
+let activityPhase = { phase: 'idle', detail: '', startedAt: null };
+
+function setPhase(phase, detail = '') {
+  activityPhase = { phase, detail, startedAt: new Date().toISOString() };
+  log('debug', `Phase: ${phase}${detail ? ' — ' + detail : ''}`);
+}
+
+// --- LLM-Driven Autonomous Cycle ---
 let cycleCount = 0;
-const CODE_ANALYSIS_EVERY_N_CYCLES = 60; // Run code analysis roughly once per hour (taskInterval * N)
+let lastAnalysisCycle = 0;
+
+function getResearchDbPath() { return path.resolve(ROOT, 'brain', 'research'); }
+function getAnalysisDbPath() { return path.resolve(ROOT, 'brain', 'analysis'); }
 
 function scheduleAutonomousTasks() {
   cycleCount++;
-  const dbPath = path.resolve(ROOT, config.knowledgeDb);
-  const folders = config.targetFolders || [];
-  const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
 
-  // Primary: Agent-driven research — web search, page fetch, summarization
-  // This runs every cycle to prioritize information gathering
-  taskManager.enqueue(createTask('agent:research', async () => {
+  // Single task: LLM decides what to do next
+  taskManager.enqueue(createTask('autonomous:plan', async () => {
+    const researchDbPath = getResearchDbPath();
+    const analysisDbPath = getAnalysisDbPath();
+    const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
+    const folders = config.targetFolders || [];
+
+    // Gather current state for LLM
+    const recentResearch = getNewKnowledge(researchDbPath, 48);
+    const recentTopics = recentResearch.map(e => e.topic).filter(Boolean);
+    const recentInsights = recentResearch.slice(-3).map(e =>
+      `[${e.topic || '?'}] ${(e.insights || []).slice(0, 2).join('; ').slice(0, 150)}`
+    ).join('\n') || 'なし';
+
+    const modulesDir = path.resolve(ROOT, 'brain', 'modules');
+    let moduleCount = 0;
+    try { moduleCount = fs.readdirSync(modulesDir).filter(f => f.endsWith('.js')).length; } catch {}
+
+    const visitedUrls = loadVisitedUrls();
     const context = collectContext();
-    const searchPrompt = config.searchPrompt || '最新の技術トレンドを調査してください';
 
-    log('info', `Agent research starting: ${searchPrompt.slice(0, 60)}`);
-
-    const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
-      workLogDir,
-      onLog: log,
-      mode: 'research'
+    const prompt = fillPrompt('plan-next-action.user', {
+      cycleCount: String(cycleCount),
+      knowledgeCount: String(context.knowledgeCount),
+      moduleCount: String(moduleCount),
+      visitedUrlCount: String(visitedUrls.length),
+      lastAnalysis: lastAnalysisCycle ? `${cycleCount - lastAnalysisCycle}サイクル前` : '未実施',
+      recentActivity: context.recentActivity,
+      userPrompt: config.searchPrompt || 'なし',
+      autoPrompt: autoSearchPrompt || 'なし',
+      recentTopics: recentTopics.slice(-5).join(', ') || 'なし',
+      recentInsights
     });
 
-    // Always save research results to knowledge DB (summary + any insights)
-    const hasInsights = result.insights && result.insights.length > 0;
-    const hasSummary = result.summary && result.summary.length > 10;
+    let action = 'research'; // fallback
+    let topic = '';
+    let reason = '';
 
-    if (hasInsights || hasSummary) {
-      saveKnowledge(dbPath, 'research', {
-        topic: searchPrompt.slice(0, 50),
-        query: searchPrompt,
-        insights: result.insights || [],
-        summary: result.summary || '',
-        steps: result.steps,
-        actions: result.actions || []
-      });
-      log('info', `Research saved: ${(result.insights || []).length} insights, ${result.steps} steps`);
-    } else {
-      log('info', `Research yielded no results: ${result.summary?.slice(0, 100) || 'empty'}`);
+    setPhase('planning', 'Deciding next action');
+    try {
+      const response = await ollamaClient.query(prompt, loadPrompt('plan-next-action.system'));
+      const text = (response.response || '').trim();
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.action) action = parsed.action;
+        if (parsed.topic) topic = parsed.topic;
+        if (parsed.reason) reason = parsed.reason;
+      }
+    } catch (e) {
+      log('debug', `Plan parsing failed, defaulting to research: ${e.message}`);
     }
 
-    return result;
-  }));
+    log('info', `Autonomous decision: ${action}${topic ? ` (${topic.slice(0, 50)})` : ''} — ${reason.slice(0, 60)}`);
+    setPhase(action, topic || reason.slice(0, 60));
 
-  // Secondary: Code analysis — runs infrequently (~once per hour)
-  if (cycleCount % CODE_ANALYSIS_EVERY_N_CYCLES === 0) {
-    taskManager.enqueue(createTask('agent:analyze', async () => {
-      log('info', 'Agent code analysis starting (periodic)');
+    // Execute the chosen action
+    switch (action) {
+      case 'research':
+      case 'deep_research': {
+        const userPrompt = config.searchPrompt || '';
+        const llmPrompt = autoSearchPrompt || '';
+        let searchPrompt;
 
-      const result = await runAgentLoop(ollamaClient, 'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
-        workLogDir,
-        onLog: log,
-        mode: 'analyze',
-        targetFolders: folders
-      });
+        if (action === 'deep_research' && topic) {
+          searchPrompt = topic;
+        } else if (userPrompt && llmPrompt) {
+          searchPrompt = `${userPrompt}\n\nまた、以下の関連テーマも探索してください: ${llmPrompt}`;
+        } else {
+          searchPrompt = userPrompt || llmPrompt || '最新の技術トレンドを調査してください';
+        }
 
-      const hasData = (result.insights && result.insights.length > 0) ||
-                      (result.summary && result.summary.length > 10);
-      if (hasData) {
-        saveKnowledge(dbPath, 'analysis', {
-          topic: 'コードベース解析',
-          insights: result.insights || [],
-          summary: result.summary || '',
-          steps: result.steps
+        setPhase('searching', searchPrompt.slice(0, 60));
+        const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
+          workLogDir, onLog: log, mode: 'research',
+          visitedUrls, recentTopics
         });
-        log('info', `Code analysis saved: ${(result.insights || []).length} findings, ${result.steps} steps`);
+
+        if (result.visitedUrls && result.visitedUrls.length > 0) {
+          addVisitedUrls(result.visitedUrls);
+        }
+
+        // Don't save empty/interrupted results
+        if (result.empty) {
+          log('debug', 'Research cycle produced no data (possibly interrupted)');
+          setPhase('idle');
+          return result;
+        }
+
+        const hasData = (result.insights && result.insights.length > 0) ||
+                        (result.summary && result.summary.length > 10);
+        if (hasData) {
+          setPhase('saving', 'Research results');
+          saveKnowledge(researchDbPath, 'research', {
+            topic: topic || searchPrompt.slice(0, 50),
+            insights: result.insights || [],
+            summary: result.summary || ''
+          });
+          log('info', `Research saved: ${(result.insights || []).length} insights`);
+          updateAutoSearchPrompt(ollamaClient, result.summary, recentTopics);
+        }
+        return result;
       }
 
-      return result;
-    }));
-  }
-
-  // Generate code module from accumulated knowledge
-  taskManager.enqueue(createTask('generate:module', async () => {
-    const knowledge = getNewKnowledge(dbPath, 48);
-    if (knowledge.length === 0) {
-      log('debug', 'No recent knowledge to generate modules from');
-      return { skipped: true };
-    }
-
-    // Pick the most recent research entry with actual insights or summary
-    const researchEntries = knowledge.filter(k =>
-      (Array.isArray(k.insights) && k.insights.length > 0) ||
-      (k.summary && k.summary.length > 20)
-    );
-    if (researchEntries.length === 0) return { skipped: true };
-
-    const entry = researchEntries[researchEntries.length - 1];
-    const topic = entry.topic || 'utility';
-    const modulesDir = path.resolve(ROOT, 'brain', 'modules');
-
-    log('info', `Generating module from knowledge: ${topic}`);
-    const result = await generateModule(ollamaClient, topic, entry, modulesDir);
-
-    if (result.success) {
-      log('info', `Module generated: ${path.basename(result.file)} (committed: ${result.committed})`);
-    } else if (result.skipped) {
-      log('debug', `Module already exists for: ${topic}`);
-    } else {
-      log('info', `Module generation failed: ${result.reason}`);
-    }
-    return result;
-  }));
-
-  // Phase 4: Code improvement — pick a file from targetFolders ONLY (never edit project core code)
-  taskManager.enqueue(createTask('self:improve', async () => {
-    const allFiles = [];
-
-    // Include target folders ONLY (brain/modules) — never core/lib/explorers
-    for (const folder of folders) {
-      allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
-    }
-
-    if (allFiles.length === 0) {
-      log('debug', 'No files to improve yet');
-      return { skipped: true };
-    }
-
-    const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
-    const relPath = path.relative(ROOT, targetFile);
-    log('info', `Proposing refactor: ${relPath}`);
-    const proposal = await proposeRefactor(ollamaClient, targetFile);
-
-    if (proposal.refactoredCode) {
-      log('info', `Applying refactor to ${relPath}`);
-      const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode, folders);
-      if (result.success) {
-        log('info', `Refactor applied and committed: ${relPath}`);
-      } else {
-        log('info', `Refactor not applied: ${result.reason}`);
+      case 'organize': {
+        setPhase('organizing', 'Compressing knowledge');
+        log('info', 'Organizing knowledge...');
+        const r1 = await compressKnowledge(ollamaClient, researchDbPath);
+        const r2 = await compressKnowledge(ollamaClient, analysisDbPath);
+        const total = [...(r1.compressed || []), ...(r2.compressed || [])];
+        if (total.length > 0) {
+          log('info', `Compressed: ${total.map(c => `${c.file} ${c.before}→${c.after}`).join(', ')}`);
+        } else {
+          log('info', 'No compression needed');
+        }
+        return { action: 'organize', compressed: total };
       }
-      return { file: targetFile, proposal: proposal.suggestions, applied: result.success };
-    }
 
-    log('debug', `No code changes for ${relPath}: ${proposal.reason || 'no suggestions'}`);
-    return { file: targetFile, suggestions: proposal.suggestions };
+      case 'generate_script': {
+        const knowledge = getNewKnowledge(researchDbPath, 48);
+        const researchEntries = knowledge.filter(k =>
+          (Array.isArray(k.insights) && k.insights.length > 0) || (k.summary && k.summary.length > 20)
+        );
+        if (researchEntries.length === 0) {
+          log('info', 'No knowledge available for script generation');
+          return { skipped: true };
+        }
+
+        // Use topic if specified, otherwise pick most recent
+        let entry;
+        if (topic) {
+          entry = researchEntries.find(e => e.topic && e.topic.includes(topic)) || researchEntries[researchEntries.length - 1];
+        } else {
+          entry = researchEntries[researchEntries.length - 1];
+        }
+
+        const entryTopic = topic || entry.topic || 'utility';
+        setPhase('generating', entryTopic);
+        log('info', `Generating script: ${entryTopic}`);
+        const result = await generateModule(ollamaClient, entryTopic, entry, modulesDir);
+
+        if (result.success) {
+          log('info', `Script generated: ${path.basename(result.file)}`);
+        } else if (!result.skipped) {
+          log('info', `Script generation failed: ${result.reason}`);
+        }
+        return result;
+      }
+
+      case 'analyze_code': {
+        lastAnalysisCycle = cycleCount;
+        setPhase('analyzing', 'Codebase analysis');
+        log('info', 'Analyzing codebase...');
+        const result = await runAgentLoop(ollamaClient,
+          'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
+          workLogDir, onLog: log, mode: 'analyze', targetFolders: folders
+        });
+
+        const hasData = (result.insights && result.insights.length > 0) ||
+                        (result.summary && result.summary.length > 10);
+        if (hasData) {
+          saveKnowledge(analysisDbPath, 'analysis', {
+            topic: 'コードベース解析',
+            insights: result.insights || [],
+            summary: result.summary || ''
+          });
+          log('info', `Analysis saved: ${(result.insights || []).length} findings`);
+        }
+        return result;
+      }
+
+      case 'improve_code': {
+        const allFiles = [];
+        for (const folder of folders) {
+          allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
+        }
+        if (allFiles.length === 0) {
+          log('info', 'No files to improve');
+          return { skipped: true };
+        }
+
+        const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
+        const relPath = path.relative(ROOT, targetFile);
+        setPhase('improving', relPath);
+        log('info', `Improving: ${relPath}`);
+        const proposal = await proposeRefactor(ollamaClient, targetFile);
+
+        if (proposal.refactoredCode) {
+          const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode, folders);
+          if (result.success) log('info', `Refactor applied: ${relPath}`);
+          else log('info', `Refactor skipped: ${result.reason}`);
+          return result;
+        }
+        return { suggestions: proposal.suggestions };
+      }
+
+      case 'idle':
+      default:
+        setPhase('idle');
+        log('info', 'Autonomous cycle: idle (waiting for next cycle)');
+        return { action: 'idle' };
+    }
+    setPhase('idle');
   }));
 }
 
@@ -266,8 +492,8 @@ function scheduleDream() {
       const result = await dreamPhase(ollamaClient, config, ROOT);
       log('info', 'Dream phase completed', result);
 
-      const dbPath = path.resolve(ROOT, config.knowledgeDb);
-      saveKnowledge(dbPath, 'dreams', result);
+      const dreamResearchDb = path.resolve(ROOT, 'brain', 'research');
+      saveKnowledge(dreamResearchDb, 'dreams', result);
 
       // Feed nextTasks back into the task queue
       const nextTasks = result.analysis?.nextTasks || [];
@@ -293,9 +519,9 @@ function scheduleDream() {
             log('info', `Dream-driven research: ${task.topic}`);
             const res = await doubleCheck(ollamaClient, task.query);
             if (res.accepted) {
-              saveKnowledge(dbPath, 'research', {
-                topic: task.topic, query: task.query,
-                insights: res.insights, confidence: res.verification.confidence
+              saveKnowledge(dreamResearchDb, 'research', {
+                topic: task.topic,
+                insights: res.insights
               });
               log('info', `Dream knowledge saved: ${task.topic}`);
             }
@@ -306,6 +532,17 @@ function scheduleDream() {
 
       if (nextTasks.length > 0) {
         log('info', `Dream phase queued ${nextTasks.length} follow-up tasks`);
+      }
+
+      // Daily script review: check if generated scripts are valid and useful
+      const modulesDir = path.resolve(ROOT, 'brain', 'modules');
+      log('info', 'Reviewing generated scripts...');
+      const reviewResult = await reviewScripts(ollamaClient, modulesDir);
+      if (reviewResult.deleted > 0) {
+        log('info', `Script review: ${reviewResult.reviewed} reviewed, ${reviewResult.deleted} deleted`);
+        await autoCommit(ROOT, `chore: remove ${reviewResult.deleted} obsolete scripts`, ['brain/modules']);
+      } else {
+        log('info', `Script review: ${reviewResult.reviewed} scripts OK`);
       }
 
       return result;
@@ -330,15 +567,15 @@ function startServer(port) {
 
     try {
       if (method === 'GET' && url.pathname === '/status') {
-        const dbPath = path.resolve(ROOT, config.knowledgeDb);
         let knowledgeStats = { files: 0, entries: 0 };
-        if (fs.existsSync(dbPath)) {
-          const files = fs.readdirSync(dbPath).filter(f => f.endsWith('.jsonl'));
-          let entries = 0;
-          for (const file of files) {
-            entries += fs.readFileSync(path.join(dbPath, file), 'utf-8').split('\n').filter(Boolean).length;
+        for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
+          if (fs.existsSync(kbDir)) {
+            const files = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl'));
+            knowledgeStats.files += files.length;
+            for (const file of files) {
+              knowledgeStats.entries += fs.readFileSync(path.join(kbDir, file), 'utf-8').split('\n').filter(Boolean).length;
+            }
           }
-          knowledgeStats = { files: files.length, entries };
         }
 
         const lastCommit = await getLastCommit(ROOT);
@@ -348,6 +585,7 @@ function startServer(port) {
           ollama: ollamaClient ? ollamaClient.getStatus() : null,
           knowledge: knowledgeStats,
           lastCommit,
+          activity: activityPhase,
           uptime: process.uptime(),
           timestamp: new Date().toISOString()
         }));
@@ -385,41 +623,58 @@ function startServer(port) {
           return;
         }
 
-        // Gather recent knowledge for context
-        const dbPath = path.resolve(ROOT, config.knowledgeDb);
-        const recentKnowledge = getNewKnowledge(dbPath, 24);
-        const knowledgeSummary = recentKnowledge.slice(-5).map(k =>
-          `[${k.topic || 'unknown'}] ${JSON.stringify(k.insights || k).slice(0, 200)}`
+        // Gather all available knowledge for context
+        const recentResearch = getNewKnowledge(path.resolve(ROOT, 'brain', 'research'), 72);
+        const recentAnalysis = getNewKnowledge(path.resolve(ROOT, 'brain', 'analysis'), 72);
+        const recentKnowledge = [...recentResearch, ...recentAnalysis];
+        const knowledgeSummary = recentKnowledge.slice(-10).map(k =>
+          `[${k.topic || 'unknown'}] ${JSON.stringify(k.insights || k).slice(0, 300)}`
         ).join('\n');
 
-        // Run chat directly — user interaction should never wait for queued tasks
+        // Immediate response from existing knowledge
         log('info', `User chat: ${message.slice(0, 80)}`);
         try {
           const reply = await chat(ollamaClient, message, {
-            systemPrompt: config.searchPrompt,
             knowledge: knowledgeSummary
           });
-          res.end(JSON.stringify({ reply }));
+
+          // Detect if user message is a research directive and update searchPrompt
+          detectAndUpdateSearchPrompt(ollamaClient, message);
+
+          res.end(JSON.stringify({
+            reply,
+            searchPrompt: config.searchPrompt || '',
+            autoSearchPrompt: autoSearchPrompt || ''
+          }));
+
+          // Background: if the reply suggests insufficient knowledge, search and follow up
+          supplementChatWithSearch(ollamaClient, message, reply, knowledgeSummary);
         } catch (err) {
           res.statusCode = 500;
           res.end(JSON.stringify({ error: err.message }));
         }
 
       } else if (method === 'GET' && url.pathname === '/knowledge') {
-        const dbPath = path.resolve(ROOT, config.knowledgeDb);
         const count = parseInt(url.searchParams.get('count') || '50', 10);
         const category = url.searchParams.get('category') || null;
+        const source = url.searchParams.get('source') || null; // 'research' or 'analysis'
 
         const entries = [];
-        if (fs.existsSync(dbPath)) {
-          const files = fs.readdirSync(dbPath).filter(f => f.endsWith('.jsonl'));
+        const kbDirs = [];
+        if (!source || source === 'research') kbDirs.push({ dir: path.resolve(ROOT, 'brain', 'research'), src: 'research' });
+        if (!source || source === 'analysis') kbDirs.push({ dir: path.resolve(ROOT, 'brain', 'analysis'), src: 'analysis' });
+
+        for (const { dir, src } of kbDirs) {
+          if (!fs.existsSync(dir)) continue;
+          const files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'));
           for (const file of files) {
             if (category && file !== `${category}.jsonl`) continue;
-            const lines = fs.readFileSync(path.join(dbPath, file), 'utf-8').split('\n').filter(Boolean);
+            const lines = fs.readFileSync(path.join(dir, file), 'utf-8').split('\n').filter(Boolean);
             for (const line of lines) {
               try {
                 const entry = JSON.parse(line);
                 entry._category = file.replace('.jsonl', '');
+                entry._source = src;
                 entries.push(entry);
               } catch {}
             }
@@ -522,10 +777,12 @@ function start() {
 
   // Ensure brain directories exist
   const modulesDir = path.resolve(ROOT, 'brain', 'modules');
-  const knowledgeDir = path.resolve(ROOT, config.knowledgeDb);
+  const researchDir = path.resolve(ROOT, 'brain', 'research');
+  const analysisDir = path.resolve(ROOT, 'brain', 'analysis');
   const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
   if (!fs.existsSync(modulesDir)) fs.mkdirSync(modulesDir, { recursive: true });
-  if (!fs.existsSync(knowledgeDir)) fs.mkdirSync(knowledgeDir, { recursive: true });
+  if (!fs.existsSync(researchDir)) fs.mkdirSync(researchDir, { recursive: true });
+  if (!fs.existsSync(analysisDir)) fs.mkdirSync(analysisDir, { recursive: true });
   if (!fs.existsSync(workLogDir)) fs.mkdirSync(workLogDir, { recursive: true });
 
   // Start task manager

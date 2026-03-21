@@ -1,0 +1,22 @@
+## 現在の状態
+
+- サイクル数: {{cycleCount}}
+- 蓄積知識数: {{knowledgeCount}} エントリ
+- 生成済みモジュール数: {{moduleCount}} ファイル
+- 訪問済みURL数: {{visitedUrlCount}}
+- 前回のコード解析: {{lastAnalysis}}
+- 直近のアクティビティ: {{recentActivity}}
+
+## ユーザー指定のリサーチプロンプト
+{{userPrompt}}
+
+## LLMの自律探索テーマ
+{{autoPrompt}}
+
+## 直近のリサーチトピック（最新5件）
+{{recentTopics}}
+
+## 蓄積知識のサマリー（最新3件のinsights）
+{{recentInsights}}
+
+次に実行すべきアクションをJSON形式で回答してください。

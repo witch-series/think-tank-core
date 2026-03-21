@@ -3,13 +3,13 @@
 ```
 /think-tank-core
 ├── package.json            # npm scripts (start, setup, analyze, ui)
-├── main.js                 # エントリポイント: APIサーバ、タスクループ、Dreamスケジューラ、CLI
+├── main.js                 # エントリポイント: APIサーバ、LLM自律ループ、Dreamスケジューラ、CLI
 ├── config/
 │   ├── settings.json       # ユーザー設定（gitignore対象）
 │   └── settings.default.json # デフォルト設定テンプレート
 ├── core/
 │   ├── agent-loop.js       # 2フェーズ情報収集エージェント（gather→summarize）
-│   ├── evolution.js        # 自己修正: Git差分分析、Dream Phase、リファクタ提案、モジュール生成
+│   ├── evolution.js        # 自己修正: Git差分分析、Dream Phase、リファクタ、モジュール生成、スクリプトレビュー、知識圧縮
 │   └── task-manager.js     # EventEmitterベースのタスクキュー管理
 ├── explorers/
 │   ├── crawler.js          # HTTPフェッチ（リダイレクト追従対応）+ Ollama連携で4項目抽出
@@ -35,14 +35,21 @@
 │   ├── gather-generic.system.txt
 │   ├── summarize-findings.user.txt / .system.txt
 │   ├── verify.user.txt / .system.txt
-│   └── extract-insights.user.txt
+│   ├── extract-insights.user.txt
+│   ├── detect-research-intent.system.txt    # ユーザーチャットからリサーチ意図を検出
+│   ├── compress-knowledge.system.txt / .user.txt  # 知識DB圧縮
+│   ├── next-search-direction.system.txt     # LLM自律探索方向の決定
+│   ├── plan-next-action.system.txt / .user.txt    # LLM自律行動計画（7アクション）
+│   └── review-scripts.system.txt            # スクリプト有用性レビュー
 ├── brain/
 │   ├── modules/            # LLMが生成・改善するJSコード群
-│   ├── knowledge-db/       # 評価済み知識 (JSONL形式)
-│   └── work-logs/          # エージェントの作業ログ
+│   ├── research/           # リサーチ結果の知識DB (JSONL形式)
+│   ├── analysis/           # コード解析結果の知識DB (JSONL形式)
+│   ├── work-logs/          # エージェントの作業ログ
+│   └── visited-urls.json   # 訪問済みURL一覧（重複検索回避）
 ├── ui/
 │   ├── server.js           # Express UIサーバー（ポート3001）
-│   ├── public/index.html   # ダッシュボードUI
+│   ├── public/index.html   # ダッシュボードUI（タブ切替・進捗表示・検索機能付き）
 │   └── package.json        # UI依存パッケージ（express）
 └── docs/                   # 実装ドキュメント
 ```
@@ -55,7 +62,7 @@
 
 ### `core/`
 
-システムの中核ロジック。タスク管理、2フェーズエージェント、自己進化の仕組みを担う。
+システムの中核ロジック。LLM自律判断によるタスク管理、2フェーズエージェント、自己進化の仕組みを担う。
 
 ### `explorers/`
 
@@ -74,9 +81,11 @@ LLMに送信するプロンプトテンプレートを `.txt` ファイルとし
 システムが自律的に管理するデータ領域。
 
 - `modules/` — システムが生成・改善するJSコード（純粋なNode.js、外部パッケージ不使用）
-- `knowledge-db/` — 検証済み知識を JSONL 形式で蓄積
+- `research/` — Web検索・リサーチで得た知識を JSONL 形式で蓄積
+- `analysis/` — コードベース解析結果を JSONL 形式で蓄積
 - `work-logs/` — エージェントの実行ログ
+- `visited-urls.json` — 訪問済みURLの一覧（重複検索を回避し新しい情報源を優先）
 
 ### `ui/`
 
-Express ベースのダッシュボードUI。ステータス表示、チャット、ナレッジDB閲覧、ログ表示機能を持つ。
+Express ベースのダッシュボードUI。5タブ構成（Chat, Summary, Knowledge DB, Logs, Status）。アクティビティバーで現在の処理フェーズをリアルタイム表示。Knowledge DBはinsightsのキーワード検索が可能。

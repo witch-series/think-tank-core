@@ -210,13 +210,31 @@ function cleanOldWorkLogs(workLogDir, maxAgeHours = 72) {
  * Uses a hybrid approach: LLM decides search queries, but the system
  * automatically fetches top search result pages (no LLM decision needed).
  */
-async function gatherResearch(client, taskDescription, onLog) {
+async function gatherResearch(client, taskDescription, onLog, options = {}) {
   const collectedData = [];
   const executedActions = [];
+  const visitedUrls = new Set(options.visitedUrls || []);
+  const newlyVisited = [];
+
+  // Build context notes for query generation
+  let visitedNote = '';
+  if (visitedUrls.size > 0) {
+    const sample = [...visitedUrls].slice(-20).map(u => u.slice(0, 60));
+    visitedNote = '## 注意: 以下のURLは既に訪問済みです。異なる情報源を見つけるクエリにしてください。\n' + sample.join('\n');
+  }
+
+  let similarNote = '';
+  if (options.recentTopics && options.recentTopics.length > 3) {
+    similarNote = '## 注意: 最近の検索結果が似通っています。関連するが異なる視点のキーワードで検索してください。\n最近のトピック: ' + options.recentTopics.slice(-5).join(', ');
+  }
 
   // Step 1: Ask LLM for search queries based on the task
   onLog('info', 'Generating search queries...');
-  const queryPrompt = fillPrompt('search-queries.user', { taskDescription });
+  const queryPrompt = fillPrompt('search-queries.user', {
+    taskDescription,
+    visitedNote,
+    similarNote
+  });
 
   const queryResponse = await client.query(queryPrompt,
     loadPrompt('search-queries.system'));
@@ -240,24 +258,26 @@ async function gatherResearch(client, taskDescription, onLog) {
   for (const query of queries) {
     onLog('info', `Searching: "${query}"`);
     const searchResults = await searchWeb(query, 3);
-    executedActions.push({ action: 'search_web', detail: query, summary: `${searchResults.length}件` });
     totalSearchResults += searchResults.length;
 
     if (searchResults.length > 0) {
-      // Save search result snippets
       collectedData.push({
         type: 'search_results',
         source: query,
         content: searchResults.map(r => `- ${r.title}: ${r.snippet}`).join('\n')
       });
 
-      // Auto-fetch the top 2 results (don't rely on LLM to call fetch_page)
+      // Auto-fetch top 2 results, skipping already-visited URLs
       for (const result of searchResults.slice(0, 2)) {
         if (!result.url || result.url.includes('duckduckgo.com')) continue;
+        if (visitedUrls.has(result.url)) {
+          onLog('debug', `Skipping visited: ${result.url.slice(0, 60)}`);
+          continue;
+        }
 
         onLog('info', `Fetching: ${result.url.slice(0, 80)}`);
         const page = await fetchPage(result.url, 4000);
-        executedActions.push({ action: 'fetch_page', detail: result.url.slice(0, 80), summary: page.text ? `${page.text.length}文字` : (page.error || 'empty') });
+        newlyVisited.push(result.url);
 
         if (page.text && page.text.length > 100) {
           collectedData.push({
@@ -284,11 +304,11 @@ async function gatherResearch(client, taskDescription, onLog) {
           source: `arxiv: ${englishQuery.slice(0, 60)}`,
           content: papers.map(p => `- [${p.title}] ${p.summary.slice(0, 300)} (${p.url})`).join('\n')
         });
-        executedActions.push({ action: 'search_arxiv', detail: englishQuery.slice(0, 60), summary: `${papers.length}件` });
 
-        // Fetch full abstract for top paper
-        if (papers[0].url) {
+        // Fetch full abstract for top paper (if not visited)
+        if (papers[0].url && !visitedUrls.has(papers[0].url)) {
           const page = await fetchPage(papers[0].url, 6000);
+          newlyVisited.push(papers[0].url);
           if (page.text && page.text.length > 100) {
             collectedData.push({
               type: 'arxiv_page',
@@ -315,10 +335,11 @@ async function gatherResearch(client, taskDescription, onLog) {
     if (urlObj && urlObj.urls && Array.isArray(urlObj.urls)) {
       for (const url of urlObj.urls.slice(0, 4)) {
         if (!url || !url.startsWith('http')) continue;
+        if (visitedUrls.has(url)) continue;
 
         onLog('info', `Direct fetch: ${url.slice(0, 80)}`);
         const page = await fetchPage(url, 4000);
-        executedActions.push({ action: 'fetch_page', detail: url.slice(0, 80), summary: page.text ? `${page.text.length}文字` : (page.error || 'empty') });
+        newlyVisited.push(url);
 
         if (page.text && page.text.length > 100) {
           collectedData.push({
@@ -331,7 +352,7 @@ async function gatherResearch(client, taskDescription, onLog) {
     }
   }
 
-  return { collectedData, executedActions };
+  return { collectedData, executedActions, visitedUrls: newlyVisited };
 }
 
 /**
@@ -495,7 +516,7 @@ async function gatherGeneric(client, taskDescription, repoPath, workLogDir, onLo
  */
 async function summarizeFindings(client, taskDescription, collectedData, onLog) {
   if (collectedData.length === 0) {
-    return { summary: 'データを収集できませんでした', insights: [] };
+    return { summary: '', insights: [], empty: true };
   }
 
   // Build the data section, keeping total size manageable
@@ -568,7 +589,10 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   onLog('info', `Agent Phase 1: Gathering (${mode})...`);
 
   if (mode === 'research') {
-    gatherResult = await gatherResearch(client, taskDescription, onLog);
+    gatherResult = await gatherResearch(client, taskDescription, onLog, {
+      visitedUrls: options.visitedUrls || [],
+      recentTopics: options.recentTopics || []
+    });
   } else if (mode === 'analyze') {
     const targetFolders = options.targetFolders || ['.'];
     gatherResult = await gatherCodeAnalysis(repoPath, targetFolders, onLog);
@@ -589,8 +613,7 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   const finalResult = {
     summary,
     insights,
-    steps: executedActions.length,
-    actions: executedActions.map(a => a.action),
+    visitedUrls: gatherResult.visitedUrls || [],
     dataSourceCount: collectedData.length
   };
 
@@ -600,10 +623,9 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   const logFile = path.join(workLogDir, `${timestamp}_agent-result.json`);
   const safeResult = JSON.parse(sanitizeText(JSON.stringify({
     task: taskDescription.slice(0, 200),
-    result: finalResult,
-    actions: executedActions,
-    collectedSources: collectedData.map(d => ({ type: d.type, source: d.source })),
-    timestamp: new Date().toISOString()
+    summary: finalResult.summary,
+    insights: finalResult.insights,
+    sources: collectedData.map(d => d.source)
   })));
   fs.writeFileSync(logFile, JSON.stringify(safeResult, null, 2), 'utf-8');
 

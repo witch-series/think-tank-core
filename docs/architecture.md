@@ -8,8 +8,10 @@
 ┌──────────────────────────────────────────────────┐
 │                  統括コア (main.js)               │
 │  TaskManager (EventEmitter) ─ タスクキュー管理     │
+│  LLM自律判断ループ ─ 毎サイクルLLMが行動を決定     │
 │  APIサーバー ─ /status, /logs, /chat, /knowledge  │
 │  Dream Phase スケジューラ ─ 毎日 AM 5:00           │
+│  Activity Phase Tracker ─ UI進捗表示用             │
 ├──────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │
 │  │ 探索ユニット │  │エージェント   │  │自己解析  │ │
@@ -18,8 +20,9 @@
 │  │ verifier.js │  │ gather→sum   │  │sandbox  │ │
 │  └──────┬──────┘  └──────┬───────┘  └────┬────┘ │
 ├──────────────────────────────────────────────────┤
-│     knowledge-db (JSONL)    │    Git (.git/)     │
-│     brain/modules (JS)      │    .summary.json   │
+│  brain/research (JSONL)  │  brain/analysis (JSONL)│
+│  brain/modules (JS)      │  brain/visited-urls.json│
+│  brain/work-logs         │  Git (.git/)           │
 ├──────────────────────────────────────────────────┤
 │  prompt-loader.js ─ prompts/ テンプレート管理      │
 │  ollama-client.js ─ マルチURL フェイルオーバー      │
@@ -30,30 +33,50 @@
 
 **ファイル**: `main.js`, `core/task-manager.js`, `core/evolution.js`
 
-### 継続実行
+### LLM自律判断ループ
 
 - `TaskManager` が `EventEmitter` ベースでタスクキューを管理
-- タスク完了時に `idle` イベントを発火し、自律タスク（リサーチ・コード解析・モジュール生成）を自動挿入
-- LLM を遊ばせない無限ループを実現
+- タスク完了時に `idle` イベントを発火し、LLM に次の行動を決定させる
+- LLM が7種類のアクションから最適な行動を選択:
+  - `research` — Web検索による情報収集
+  - `deep_research` — 特定トピックの深掘り調査
+  - `organize` — 知識DBの圧縮・整理
+  - `generate_script` — 蓄積知識からモジュール生成
+  - `analyze_code` — コードベースの解析
+  - `improve_code` — targetFolders内コードの改善
+  - `idle` — 次のサイクルまで待機
 
-### タスク優先度
+### 2層検索プロンプト
 
-- **リサーチ（Web検索・情報要約）**: 毎サイクル実行（最優先）
-- **コード解析**: 60サイクルに1回（約1時間に1回）
-- **モジュール生成**: 毎サイクル（蓄積知識から生成）
-- **自己改善**: 毎サイクル（targetFolders内のコードのみ対象）
+- **ユーザー指定 `searchPrompt`**: ユーザーのチャットから検出し、`settings.json` に永続化
+- **LLM自律 `autoSearchPrompt`**: LLMが自ら決定する探索方向（メモリ上のみ、再起動で消失）
+- ユーザーの意図とLLMの自律探索が独立に管理される
+
+### Activity Phase Tracking
+
+- 現在の処理フェーズ（planning, searching, saving, organizing, generating, analyzing, improving, idle）を追跡
+- `/status` API で `activity` フィールドとして公開
+- UIのアクティビティバーでリアルタイム表示
 
 ### 割り込み
 
 - ユーザー入力（API / CLI）があった場合のみ、`prioritize()` でキューの先頭にタスクを挿入
 - 現在実行中のタスクは完了まで待機し、次の処理で割り込みタスクを実行
+- 検索中にユーザーチャットが割り込んだ場合、空結果は「失敗」としてログに残さない
 
 ### Dream Phase (AM 5:00)
 
 - 直近24時間の Git コミットログと差分を抽出
 - knowledge-db の新規エントリを収集
 - Ollama に学習・分析指示を送信
-- 結果を `knowledge-db/dreams.jsonl` に記録
+- 結果を `brain/research/dreams.jsonl` に記録
+- **スクリプトレビュー**: 生成済みスクリプトの構文検証・サンドボックス実行・LLM有用性判定を実施し、不要なものを自動削除
+
+### スマートチャット
+
+- ユーザーの質問に対して、直近72時間の知識DB（最大10件）から即座に回答
+- 回答が不十分な場合、バックグラウンドで補足検索を自動実行
+- ユーザーのチャットからリサーチ意図を検出し、`searchPrompt` を動的に更新
 
 ## 2. 外部探索ユニット (Explorer)
 
@@ -81,7 +104,10 @@
 `agent-loop.js` による情報収集:
 
 1. **Gather Phase**: Web検索 → ページ取得 → arxiv検索 → 生データ収集
-2. **Summarize Phase**: 収集データを LLM で構造化要約（課題・行動・残課題・可能性）
+   - 訪問済みURLをスキップ（`brain/visited-urls.json` で管理）
+   - 類似トピックの重複検出と検索ワード分岐
+2. **Summarize Phase**: 収集データを LLM で構造化要約
+   - データ未収集（中断含む）時は `{ empty: true }` を返し、知識DBを汚染しない
 
 ### 2重チェック
 
@@ -120,7 +146,36 @@
    - タイムアウト付き（デフォルト10秒）
 3. **ファイル構文検証** (`testFile`): `node -c` による構文チェック
 
-## 4. プロンプトテンプレート
+### スクリプトレビュー (evolution.js: reviewScripts)
+
+Dream Phase で1日1回実行:
+
+1. `brain/modules/` 内の全 `.js` ファイルを走査
+2. 各ファイルに対し `validateSyntax` + `runInSandbox` で検証
+3. 結果をLLMに送信し、有用性を判定（`review-scripts.system` プロンプト使用）
+4. LLMが `keep: false` と判定したファイルを自動削除（`.summary.json` も含む）
+5. 削除があればGitで自動コミット
+
+## 4. 知識DB管理
+
+### 分離ストレージ
+
+- `brain/research/` — Web検索・リサーチ結果（JSONL形式）
+- `brain/analysis/` — コードベース解析結果（JSONL形式）
+- 各エントリは `topic`, `insights`, `summary` を含む（タイムスタンプ・ステップ情報は除外）
+
+### 訪問URL追跡
+
+- `brain/visited-urls.json` で訪問済みURLを一元管理
+- エージェントループが自動的にスキップし、新しい情報源を優先探索
+
+### 知識圧縮
+
+- エントリ数が20を超えたJSONLファイルを対象
+- LLMが重複・類似エントリを統合し、情報量を維持しながらファイルサイズを削減
+- `organize` アクション時に自動実行
+
+## 5. プロンプトテンプレート
 
 **ファイル**: `lib/prompt-loader.js`, `prompts/*.txt`
 
@@ -129,7 +184,7 @@
 - `fillPrompt(name, vars)` で `{{variable}}` プレースホルダを置換
 - コードからプロンプト文字列を分離し、保守性を向上
 
-## 5. Ollama クライアント
+## 6. Ollama クライアント
 
 **ファイル**: `lib/ollama-client.js`
 
@@ -138,7 +193,7 @@
 - 生成タイムアウト: 120秒
 - `getStatus()` で現在のURL、失敗カウント、利用可能URLリストを取得
 
-## 6. セキュリティガード
+## 7. セキュリティガード
 
 ### targetFolders 制限
 
