@@ -310,10 +310,95 @@ async function applyRefactor(repoPath, filePath, refactoredCode) {
   return { success: commitResult.success, commit: commitResult.output || commitResult.error };
 }
 
+// --- Code generation from knowledge ---
+
+async function generateModule(ollamaUrl, model, topic, knowledge, modulesDir) {
+  const safeName = topic.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40).toLowerCase();
+  const filePath = path.join(modulesDir, `${safeName}.js`);
+
+  // Skip if already exists
+  if (fs.existsSync(filePath)) return { skipped: true, file: filePath };
+
+  const prompt = `以下の研究結果に基づいて、実用的なNode.jsモジュールを生成してください。
+
+## テーマ: ${topic}
+
+## 研究結果:
+${JSON.stringify(knowledge, null, 2)}
+
+要件:
+- 'use strict' で始める
+- Node.js標準ライブラリのみ使用
+- module.exports で関数をエクスポート
+- JSDocコメントを含める
+- 実用的で再利用可能なコード
+
+コードのみを返してください（説明不要）。`;
+
+  const response = await queryOllama(ollamaUrl, model, prompt,
+    'あなたはNode.jsの専門家です。安全で堅牢なコードを生成してください。evalやnew Functionは絶対に使わないでください。');
+
+  // Extract code from response
+  let code = response.response;
+  const codeBlockMatch = code.match(/```(?:javascript|js)?\s*\n([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    code = codeBlockMatch[1];
+  }
+
+  // Validate
+  const validation = validateCode(code);
+  if (!validation.valid) {
+    return { success: false, reason: 'Generated code has critical issues', issues: validation.issues };
+  }
+
+  const sensitiveIssues = containsSensitiveData(code);
+  if (sensitiveIssues.length > 0) {
+    return { success: false, reason: 'Generated code contains sensitive data' };
+  }
+
+  // Sandbox test
+  const sandboxResult = await runInSandbox(`
+    const code = ${JSON.stringify(code)};
+    new Function(code);
+    console.log('Syntax OK');
+  `);
+
+  if (!sandboxResult.success) {
+    return { success: false, reason: 'Sandbox validation failed' };
+  }
+
+  // Write and commit
+  if (!fs.existsSync(modulesDir)) fs.mkdirSync(modulesDir, { recursive: true });
+  fs.writeFileSync(filePath, code, 'utf-8');
+
+  const commitResult = await autoCommit(
+    path.resolve(modulesDir, '..', '..'),
+    `feat: generate module ${safeName} from research`,
+    ['brain/modules']
+  );
+
+  return { success: true, file: filePath, committed: commitResult.success };
+}
+
+// --- Chat with LLM ---
+
+async function chat(ollamaUrl, model, userMessage, context) {
+  const systemPrompt = context?.systemPrompt ||
+    'あなたは自律思考エンジンのアシスタントです。ユーザーの質問に簡潔に回答してください。現在のシステム状態に基づいて回答してください。';
+
+  const prompt = context?.knowledge
+    ? `## システムの知識:\n${context.knowledge}\n\n## ユーザーの質問:\n${userMessage}`
+    : userMessage;
+
+  const response = await queryOllama(ollamaUrl, model, prompt, systemPrompt);
+  return response.response;
+}
+
 module.exports = {
   getRecentCommits, getLastCommit, getDiff, autoCommit,
   getNewKnowledge, saveKnowledge,
   generateNextQuestion, dreamPhase,
   proposeRefactor, applyRefactor,
-  sanitizeText, containsSensitiveData
+  sanitizeText, containsSensitiveData,
+  generateModule, chat
 };

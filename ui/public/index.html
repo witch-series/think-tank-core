@@ -26,12 +26,43 @@
     .queue-list { font-size: 12px; }
     .queue-list li { padding: 3px 0; color: #ccc; list-style: none; }
     .queue-list li::before { content: '▸ '; color: #6272a4; }
-    #logs { max-height: 400px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+    #logs { max-height: 300px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
     .log-entry { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
     .log-entry.error { color: #ff5555; }
     .log-entry.warn { color: #f1fa8c; }
     .log-entry.info { color: #ccc; }
     .log-entry.debug { color: #6272a4; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 0; margin-bottom: 0; }
+    .tab { padding: 6px 16px; font-size: 12px; background: #111; border: 1px solid #333; border-bottom: none; cursor: pointer; color: #888; border-radius: 4px 4px 0 0; }
+    .tab.active { background: #1a1a2e; color: #bd93f9; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Chat */
+    .chat-area { max-height: 300px; overflow-y: auto; margin-bottom: 8px; }
+    .chat-msg { padding: 6px 0; border-bottom: 1px solid #1a1a2e; font-size: 13px; line-height: 1.5; }
+    .chat-msg.user { color: #8be9fd; }
+    .chat-msg.user::before { content: 'You: '; font-weight: bold; }
+    .chat-msg.assistant { color: #f8f8f2; }
+    .chat-msg.assistant::before { content: 'AI: '; color: #bd93f9; font-weight: bold; }
+    .chat-msg.thinking { color: #6272a4; font-style: italic; }
+    .chat-input { display: flex; gap: 8px; }
+    .chat-input input { flex: 1; background: #111; border: 1px solid #333; color: #f8f8f2; padding: 8px; font-family: inherit; font-size: 13px; border-radius: 4px; }
+    .chat-input input:focus { outline: none; border-color: #bd93f9; }
+    .chat-input button { background: #44475a; color: #f8f8f2; border: 1px solid #555; padding: 8px 16px; cursor: pointer; font-family: inherit; font-size: 13px; border-radius: 4px; }
+    .chat-input button:hover { background: #6272a4; }
+    .chat-input button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Knowledge */
+    .knowledge-list { max-height: 400px; overflow-y: auto; }
+    .k-entry { background: #111; border: 1px solid #222; border-radius: 4px; padding: 8px; margin-bottom: 6px; font-size: 12px; }
+    .k-entry .k-topic { color: #8be9fd; font-weight: bold; margin-bottom: 4px; }
+    .k-entry .k-category { color: #bd93f9; font-size: 11px; float: right; }
+    .k-entry .k-time { color: #6272a4; font-size: 11px; }
+    .k-entry .k-body { color: #ccc; margin-top: 4px; white-space: pre-wrap; word-break: break-all; }
+
     .footer { text-align: center; padding: 12px; font-size: 11px; color: #555; }
   </style>
 </head>
@@ -45,14 +76,30 @@
     </div>
     <div class="card">
       <h2>Task Queue</h2>
-      <div id="queue-body">—</div>
+      <div id="queue-body">&mdash;</div>
     </div>
-    <div class="card full">
-      <h2>Knowledge DB</h2>
-      <div id="knowledge-body">—</div>
+  </div>
+
+  <div class="card full" style="margin-bottom:12px">
+    <div class="tabs">
+      <div class="tab active" data-tab="chat">Chat</div>
+      <div class="tab" data-tab="knowledge">Knowledge DB</div>
+      <div class="tab" data-tab="logs">Logs</div>
     </div>
-    <div class="card full">
-      <h2>Logs</h2>
+
+    <div id="tab-chat" class="tab-content active" style="padding-top:12px">
+      <div class="chat-area" id="chat-area"></div>
+      <div class="chat-input">
+        <input type="text" id="chat-input" placeholder="メッセージを入力..." />
+        <button id="chat-send">Send</button>
+      </div>
+    </div>
+
+    <div id="tab-knowledge" class="tab-content" style="padding-top:12px">
+      <div class="knowledge-list" id="knowledge-list">Loading...</div>
+    </div>
+
+    <div id="tab-logs" class="tab-content" style="padding-top:12px">
       <div id="logs"></div>
     </div>
   </div>
@@ -62,46 +109,55 @@
   <script>
     let apiUrl = 'http://localhost:3000';
 
+    // --- Tabs ---
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'knowledge') fetchKnowledge();
+      });
+    });
+
+    // --- Helpers ---
     function formatUptime(sec) {
       const h = Math.floor(sec / 3600);
       const m = Math.floor((sec % 3600) / 60);
       const s = Math.floor(sec % 60);
-      return `${h}h ${m}m ${s}s`;
+      return h + 'h ' + m + 'm ' + s + 's';
     }
-
     function badge(state) {
       if (state === 'running') return '<span class="badge running">RUNNING</span>';
       if (state === 'paused') return '<span class="badge paused">PAUSED</span>';
       return '<span class="badge stopped">STOPPED</span>';
     }
+    function esc(s) {
+      const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+    }
 
+    // --- Status ---
     async function fetchStatus() {
       try {
         const res = await fetch(apiUrl + '/status');
         const data = await res.json();
         const tm = data.taskManager;
         const state = tm.paused ? 'paused' : tm.running ? 'running' : 'stopped';
-
         document.getElementById('conn').className = 'dot ok';
-
         document.getElementById('status-body').innerHTML = [
-          `<div class="stat"><span class="label">State</span><span class="value">${badge(state)}</span></div>`,
-          `<div class="stat"><span class="label">Current Task</span><span class="value">${tm.currentTask || '—'}</span></div>`,
-          `<div class="stat"><span class="label">Queue</span><span class="value">${tm.queueLength} tasks</span></div>`,
-          `<div class="stat"><span class="label">Uptime</span><span class="value">${formatUptime(data.uptime)}</span></div>`,
-          `<div class="stat"><span class="label">Last Commit</span><span class="value">${data.lastCommit ? data.lastCommit.message : '—'}</span></div>`,
-        ].join('');
-
-        document.getElementById('knowledge-body').innerHTML = [
-          `<div class="stat"><span class="label">Files</span><span class="value">${data.knowledge.files}</span></div>`,
-          `<div class="stat"><span class="label">Entries</span><span class="value">${data.knowledge.entries}</span></div>`,
+          '<div class="stat"><span class="label">State</span><span class="value">' + badge(state) + '</span></div>',
+          '<div class="stat"><span class="label">Current Task</span><span class="value">' + esc(tm.currentTask || '\u2014') + '</span></div>',
+          '<div class="stat"><span class="label">Queue</span><span class="value">' + tm.queueLength + ' tasks</span></div>',
+          '<div class="stat"><span class="label">Uptime</span><span class="value">' + formatUptime(data.uptime) + '</span></div>',
+          '<div class="stat"><span class="label">Knowledge</span><span class="value">' + data.knowledge.entries + ' entries</span></div>',
+          '<div class="stat"><span class="label">Last Commit</span><span class="value">' + esc(data.lastCommit ? data.lastCommit.message : '\u2014') + '</span></div>',
         ].join('');
 
         if (tm.queuedTasks.length === 0) {
           document.getElementById('queue-body').innerHTML = '<span style="color:#666">Empty</span>';
         } else {
           document.getElementById('queue-body').innerHTML =
-            '<ul class="queue-list">' + tm.queuedTasks.map(t => `<li>${t}</li>`).join('') + '</ul>';
+            '<ul class="queue-list">' + tm.queuedTasks.map(function(t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>';
         }
       } catch {
         document.getElementById('conn').className = 'dot err';
@@ -109,35 +165,110 @@
       }
     }
 
+    // --- Logs ---
     async function fetchLogs() {
       try {
         const res = await fetch(apiUrl + '/logs?count=100');
         const data = await res.json();
         const container = document.getElementById('logs');
         const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
-
-        container.innerHTML = data.map(e => {
+        container.innerHTML = data.map(function(e) {
           const ts = e.timestamp.split('T')[1].split('.')[0];
-          return `<div class="log-entry ${e.level}">[${ts}] [${e.level}] ${e.message}</div>`;
+          return '<div class="log-entry ' + e.level + '">[' + ts + '] [' + e.level + '] ' + esc(e.message) + '</div>';
         }).join('');
-
         if (wasAtBottom) container.scrollTop = container.scrollHeight;
       } catch {}
     }
 
+    // --- Chat ---
+    const chatArea = document.getElementById('chat-area');
+    const chatInput = document.getElementById('chat-input');
+    const chatSend = document.getElementById('chat-send');
+
+    function addChatMsg(role, text) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg ' + role;
+      div.textContent = text;
+      chatArea.appendChild(div);
+      chatArea.scrollTop = chatArea.scrollHeight;
+      return div;
+    }
+
+    async function sendChat() {
+      const msg = chatInput.value.trim();
+      if (!msg) return;
+      chatInput.value = '';
+      chatSend.disabled = true;
+
+      addChatMsg('user', msg);
+      const thinkingEl = addChatMsg('thinking', 'Thinking...');
+
+      try {
+        const res = await fetch(apiUrl + '/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg })
+        });
+        const data = await res.json();
+        thinkingEl.remove();
+        if (data.reply) {
+          addChatMsg('assistant', data.reply);
+        } else if (data.error) {
+          addChatMsg('thinking', 'Error: ' + data.error);
+        }
+      } catch (e) {
+        thinkingEl.remove();
+        addChatMsg('thinking', 'Connection error');
+      }
+      chatSend.disabled = false;
+      chatInput.focus();
+    }
+
+    chatSend.addEventListener('click', sendChat);
+    chatInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') sendChat();
+    });
+
+    // --- Knowledge DB ---
+    async function fetchKnowledge() {
+      try {
+        const res = await fetch(apiUrl + '/knowledge?count=50');
+        const data = await res.json();
+        const container = document.getElementById('knowledge-list');
+        if (data.length === 0) {
+          container.innerHTML = '<span style="color:#666">No entries yet</span>';
+          return;
+        }
+        container.innerHTML = data.map(function(e) {
+          const time = e.timestamp ? e.timestamp.replace('T', ' ').split('.')[0] : '';
+          const topic = e.topic || e._category || 'unknown';
+          const body = e.insights
+            ? JSON.stringify(e.insights, null, 2)
+            : (e.analysis ? JSON.stringify(e.analysis, null, 2).slice(0, 500) : JSON.stringify(e, null, 2).slice(0, 300));
+          return '<div class="k-entry">' +
+            '<span class="k-category">' + esc(e._category) + '</span>' +
+            '<div class="k-topic">' + esc(topic) + '</div>' +
+            '<div class="k-time">' + esc(time) + '</div>' +
+            '<div class="k-body">' + esc(body) + '</div>' +
+            '</div>';
+        }).join('');
+      } catch {
+        document.getElementById('knowledge-list').innerHTML = '<span style="color:#ff5555">Failed to load</span>';
+      }
+    }
+
+    // --- Init ---
     async function init() {
       try {
         const res = await fetch('/api-url');
         const data = await res.json();
         apiUrl = data.url;
       } catch {}
-
       fetchStatus();
       fetchLogs();
       setInterval(fetchStatus, 5000);
       setInterval(fetchLogs, 5000);
     }
-
     init();
   </script>
 </body>

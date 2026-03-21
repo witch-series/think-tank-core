@@ -8,7 +8,8 @@ const { TaskManager, createTask } = require('./core/task-manager');
 const {
   dreamPhase, proposeRefactor, applyRefactor,
   generateNextQuestion, getLastCommit,
-  saveKnowledge, autoCommit, sanitizeText
+  saveKnowledge, autoCommit, sanitizeText,
+  generateModule, chat, getNewKnowledge
 } = require('./core/evolution');
 const { doubleCheck } = require('./explorers/verifier');
 const { extractInsights, setThinkingCallback } = require('./explorers/crawler');
@@ -151,37 +152,64 @@ function scheduleAutonomousTasks() {
     return { question, deferred: true };
   }));
 
-  // Phase 3: Code improvement — pick a file, propose refactor, apply if safe
-  if (folders.length > 0) {
-    taskManager.enqueue(createTask('self:improve', async () => {
-      const allFiles = [];
-      for (const folder of folders) {
-        allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
-      }
-      if (allFiles.length === 0) {
-        log('debug', 'No files to improve');
-        return { skipped: true };
-      }
+  // Phase 3: Generate code module from recent knowledge
+  taskManager.enqueue(createTask('generate:module', async () => {
+    const knowledge = getNewKnowledge(dbPath, 48);
+    if (knowledge.length === 0) {
+      log('debug', 'No recent knowledge to generate modules from');
+      return { skipped: true };
+    }
 
-      const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
-      log('info', `Proposing refactor: ${path.relative(ROOT, targetFile)}`);
-      const proposal = await proposeRefactor(url, model, targetFile);
+    // Pick the most recent research entry with insights
+    const researchEntries = knowledge.filter(k => k.insights || k.topic);
+    if (researchEntries.length === 0) return { skipped: true };
 
-      if (proposal.refactoredCode) {
-        log('info', `Applying refactor to ${path.basename(targetFile)}`);
-        const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode);
-        if (result.success) {
-          log('info', `Refactor applied and committed: ${path.basename(targetFile)}`);
-        } else {
-          log('info', `Refactor not applied: ${result.reason}`);
-        }
-        return { file: targetFile, proposal: proposal.suggestions, applied: result.success };
+    const entry = researchEntries[researchEntries.length - 1];
+    const topic = entry.topic || 'utility';
+    const modulesDir = path.resolve(ROOT, 'brain', 'modules');
+
+    log('info', `Generating module from knowledge: ${topic}`);
+    const result = await generateModule(url, model, topic, entry, modulesDir);
+
+    if (result.success) {
+      log('info', `Module generated: ${path.basename(result.file)} (committed: ${result.committed})`);
+    } else if (result.skipped) {
+      log('debug', `Module already exists for: ${topic}`);
+    } else {
+      log('info', `Module generation failed: ${result.reason}`);
+    }
+    return result;
+  }));
+
+  // Phase 4: Code improvement — pick a file, propose refactor, apply if safe
+  taskManager.enqueue(createTask('self:improve', async () => {
+    const allFiles = [];
+    for (const folder of folders) {
+      allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
+    }
+    if (allFiles.length === 0) {
+      log('debug', 'No files to improve yet');
+      return { skipped: true };
+    }
+
+    const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
+    log('info', `Proposing refactor: ${path.relative(ROOT, targetFile)}`);
+    const proposal = await proposeRefactor(url, model, targetFile);
+
+    if (proposal.refactoredCode) {
+      log('info', `Applying refactor to ${path.basename(targetFile)}`);
+      const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode);
+      if (result.success) {
+        log('info', `Refactor applied and committed: ${path.basename(targetFile)}`);
+      } else {
+        log('info', `Refactor not applied: ${result.reason}`);
       }
+      return { file: targetFile, proposal: proposal.suggestions, applied: result.success };
+    }
 
-      log('debug', `No code changes for ${path.basename(targetFile)}: ${proposal.reason || 'no suggestions'}`);
-      return { file: targetFile, suggestions: proposal.suggestions };
-    }));
-  }
+    log('debug', `No code changes for ${path.basename(targetFile)}: ${proposal.reason || 'no suggestions'}`);
+    return { file: targetFile, suggestions: proposal.suggestions };
+  }));
 }
 
 // --- Dream Phase Scheduler ---
@@ -307,6 +335,75 @@ function startServer(port) {
         }));
 
         res.end(JSON.stringify({ queued: true, folder: absPath }));
+
+      } else if (method === 'POST' && url.pathname === '/chat') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const { message } = JSON.parse(body);
+
+        if (!message) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'message is required' }));
+          return;
+        }
+
+        // Gather recent knowledge for context
+        const dbPath = path.resolve(ROOT, config.knowledgeDb);
+        const recentKnowledge = getNewKnowledge(dbPath, 24);
+        const knowledgeSummary = recentKnowledge.slice(-5).map(k =>
+          `[${k.topic || 'unknown'}] ${JSON.stringify(k.insights || k).slice(0, 200)}`
+        ).join('\n');
+
+        // Run chat as a prioritized task (user input = highest priority)
+        const taskPromise = new Promise((resolve, reject) => {
+          taskManager.prioritize(createTask('user:chat', async () => {
+            log('info', `User chat: ${message.slice(0, 80)}`);
+            try {
+              const reply = await chat(config.ollama.url, config.ollama.model, message, {
+                systemPrompt: config.searchPrompt,
+                knowledge: knowledgeSummary
+              });
+              resolve(reply);
+              return { message, reply };
+            } catch (err) {
+              reject(err);
+              throw err;
+            }
+          }));
+        });
+
+        try {
+          const reply = await taskPromise;
+          res.end(JSON.stringify({ reply }));
+        } catch (err) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: err.message }));
+        }
+
+      } else if (method === 'GET' && url.pathname === '/knowledge') {
+        const dbPath = path.resolve(ROOT, config.knowledgeDb);
+        const count = parseInt(url.searchParams.get('count') || '50', 10);
+        const category = url.searchParams.get('category') || null;
+
+        const entries = [];
+        if (fs.existsSync(dbPath)) {
+          const files = fs.readdirSync(dbPath).filter(f => f.endsWith('.jsonl'));
+          for (const file of files) {
+            if (category && file !== `${category}.jsonl`) continue;
+            const lines = fs.readFileSync(path.join(dbPath, file), 'utf-8').split('\n').filter(Boolean);
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                entry._category = file.replace('.jsonl', '');
+                entries.push(entry);
+              } catch {}
+            }
+          }
+        }
+
+        // Sort by timestamp descending, return latest N
+        entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        res.end(JSON.stringify(entries.slice(0, count)));
 
       } else {
         res.statusCode = 404;
