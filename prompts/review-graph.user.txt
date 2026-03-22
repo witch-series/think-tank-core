@@ -1,25 +1,20 @@
 以下はナレッジグラフの現在の状態です。キーワード（ノード）とその関係性（エッジ）を見直してください。
 
-## 現在のキーワード一覧
+現在のキーワード一覧:
 {{nodeList}}
 
-## 現在の接続一覧
+現在の接続一覧:
 {{edgeList}}
 
 以下の観点で分析し、改善を提案してください:
 
-1. **統合**: 同じ概念・技術を指す重複キーワードは必ず統合する。略語違い、言語違い、表記ゆれはすべて統合対象
-2. **分類**: 各キーワードに適切なカテゴリを割り当てる:
-   - programming / ai / security / web / database / network / hardware
-   - science / business / devops / mobile / data / design / os / cloud
-   - robotics（ロボット工学・制御・自律システム）
-   - nlp（自然言語処理）
-   - computer_vision（コンピュータビジョン・画像認識）
-   - graphics（3Dグラフィックス・レンダリング・CG）
-3. **新しい接続**: 関連するキーワード間に接続がなければ追加する（特に同じ分野内のキーワード間）
-4. **不要な接続**: 実際には関連性が薄い接続があれば削除する
+(1) 統合: 同じ概念・技術を指す重複キーワードは必ず統合する。略語違い、言語違い、表記ゆれはすべて統合対象。
+(2) 分類: 各キーワードに適切なカテゴリを割り当てる。
+    カテゴリ一覧: programming / ai / security / web / database / network / hardware / science / business / devops / mobile / data / design / os / cloud / robotics / nlp / computer_vision / graphics
+(3) 新しい接続: 関連するキーワード間に接続がなければ追加する（特に同じ分野内のキーワード間）
+(4) 不要な接続: 実際には関連性が薄い接続があれば削除する
 
-必ず以下のJSON形式**だけ**で回答してください:
+必ず以下のJSON形式だけで回答してください:
 {
   "merge": [
     {"from": "統合元キーワード", "into": "統合先キーワード"}

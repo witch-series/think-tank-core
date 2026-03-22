@@ -1,15 +1,14 @@
 以下のリサーチ結果からキーワードを抽出し、それぞれの関連性を分析してください。
 
-## トピック
-{{topic}}
+トピック: {{topic}}
 
-## サマリー
+サマリー:
 {{summary}}
 
-## インサイト
+インサイト:
 {{insights}}
 
-## ソースURL
+ソースURL:
 {{sources}}
 
 以下のJSON形式だけで回答してください:
@@ -18,7 +17,7 @@
     {
       "keyword": "キーワード名（短く、具体的に）",
       "description": "このキーワードの簡潔な説明（1-2文）",
-      "category": "分類（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud）",
+      "category": "分類（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）",
       "importance": 1-5
     }
   ],

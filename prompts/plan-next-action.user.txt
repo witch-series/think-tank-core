@@ -1,37 +1,36 @@
-## 現在の状態
+現在の状態:
+サイクル数: {{cycleCount}}
+蓄積知識数: {{knowledgeCount}} エントリ
+生成済みモジュール数: {{moduleCount}} ファイル
+訪問済みURL数: {{visitedUrlCount}}
+前回のコード解析: {{lastAnalysis}}
+直近のアクティビティ: {{recentActivity}}
 
-- サイクル数: {{cycleCount}}
-- 蓄積知識数: {{knowledgeCount}} エントリ
-- 生成済みモジュール数: {{moduleCount}} ファイル
-- 訪問済みURL数: {{visitedUrlCount}}
-- 前回のコード解析: {{lastAnalysis}}
-- 直近のアクティビティ: {{recentActivity}}
-
-## 最終目標（最も重要）
+最終目標（最も重要）:
 {{userPrompt}}
 
-## ナレッジグラフ
-- キーワード数: {{graphNodeCount}} ノード / {{graphEdgeCount}} エッジ
-- 接続密度: {{graphDensity}} / カテゴリ数: {{graphCategories}}
-- グラフスコア: {{graphScore}} (推移: {{graphRecentScores}})
-- スコア変化: {{graphScoreChange}} {{graphStagnant}}
-- 調査が不足しているキーワード: {{underExplored}}
-- 接続を増やすべき検索候補: {{searchSuggestions}}
+ナレッジグラフ:
+キーワード数: {{graphNodeCount}} ノード / {{graphEdgeCount}} エッジ
+接続密度: {{graphDensity}} / カテゴリ数: {{graphCategories}}
+グラフスコア: {{graphScore}} (推移: {{graphRecentScores}})
+スコア変化: {{graphScoreChange}} {{graphStagnant}}
+調査が不足しているキーワード: {{underExplored}}
+接続を増やすべき検索候補: {{searchSuggestions}}
 
-## ⚠️ 調査過多のキーワード（これらのキーワードをtopicに含めないこと）
+調査過多のキーワード（これらをtopicに含めないこと）:
 {{overResearched}}
 
-## 直近のリサーチトピック（最新10件 — これらと同じ・類似のtopicは避けること）
+直近のリサーチトピック（最新10件。これらと同じ・類似のtopicは避けること）:
 {{recentTopics}}
 
-## 蓄積知識のサマリー（最新3件のinsights）
+蓄積知識のサマリー（最新3件のinsights）:
 {{recentInsights}}
 
-## 検索方針
-1. **最終目標に関連する新しいキーワードを探す** — 最終目標に関連しつつ、まだ調査していないキーワードを探す
-2. **直近10件と同じ・類似のtopicは絶対に避ける** — 上のリストに含まれるキーワードは使わない
-3. **調査過多のキーワードは避ける** — ⚠️マークのキーワードをtopicに含めない
-4. **調査不足のキーワードを優先する** — 「調査が不足しているキーワード」から選んでtopicに使う
-5. **検索候補が提示されている場合はそれを使う** — 効率的にグラフを拡大できる
+検索方針:
+- 最終目標に関連する新しいキーワードを探す。まだ調査していないキーワードを選ぶ
+- 直近10件と同じ・類似のtopicは絶対に避ける
+- 調査過多のキーワードは避ける
+- 調査不足のキーワードを優先する
+- 検索候補が提示されている場合はそれを使う
 
 次に実行すべきアクションをJSON形式で回答してください。
