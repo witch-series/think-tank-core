@@ -608,96 +608,155 @@ async function pruneGraph(client, onLog, options = {}) {
   }
 
   // Refresh keys after pre-pass
-  const currentKeys = Object.keys(graph.nodes);
+  let currentKeys = Object.keys(graph.nodes);
   if (currentKeys.length < 2) {
     saveGraph(graph);
     return graph;
   }
 
-  // Count edges per node for context
-  const edgeCounts = {};
-  for (const k of currentKeys) edgeCounts[k] = 0;
-  for (const e of graph.edges) {
-    if (edgeCounts[e.from] !== undefined) edgeCounts[e.from]++;
-    if (edgeCounts[e.to] !== undefined) edgeCounts[e.to]++;
-  }
-
-  // Sort by label (alphabetical / 五十音順)
-  const sorted = currentKeys
-    .map(k => ({ key: k, label: graph.nodes[k].label || k }))
-    .sort((a, b) => a.label.localeCompare(b.label, 'ja'));
-
-  if (onLog) onLog('info', `Pruning graph: checking ${sorted.length} keywords for duplicates`);
-
   let totalMerged = 0;
   let totalRemoved = 0;
   const removedLabels = [...prePassMerged];
 
-  // Send all keywords at once (no batching) so the LLM can see all duplicates
-  const sortedKeywords = sorted.map(s => {
-    const n = graph.nodes[s.key];
-    if (!n) return null;
-    const conn = edgeCounts[s.key] || 0;
-    return `- ${n.label} [${n.category || '未分類'}] (調査${n.count || 1}回, 接続${conn}): ${(n.description || '').slice(0, 60)}`;
-  }).filter(Boolean).join('\n');
+  // Helper: apply LLM prune result to graph
+  function applyPruneResult(result) {
+    const merges = Array.isArray(result.merge) ? result.merge : [];
+    for (const m of merges) {
+      const fromKey = normalizeKey(m.from);
+      const intoKey = normalizeKey(m.into);
+      if (!fromKey || !intoKey || fromKey === intoKey) continue;
+      if (!graph.nodes[fromKey] || !graph.nodes[intoKey]) continue;
+      mergeNodes(intoKey, fromKey);
+      totalMerged++;
+      if (onLog) onLog('debug', `Prune merge: ${m.from} → ${m.into}${m.reason ? ' (' + m.reason + ')' : ''}`);
+    }
+    const removes = Array.isArray(result.remove) ? result.remove : [];
+    for (const label of removes) {
+      const key = normalizeKey(label);
+      if (key && graph.nodes[key]) {
+        removedLabels.push(graph.nodes[key].label || label);
+        delete graph.nodes[key];
+        graph.edges = graph.edges.filter(e => e.from !== key && e.to !== key);
+        totalRemoved++;
+        if (onLog) onLog('debug', `Prune remove: ${label}`);
+      }
+    }
+  }
 
-  if (sortedKeywords) {
-    const prompt = fillPrompt('prune-graph.user', { sortedKeywords });
+  // --- Multi-round LLM pruning (5 rounds) ---
+  const MAX_ROUNDS = 5;
+  const BATCH_SIZE = 30;
 
-    try {
-      const response = await client.query(prompt, 'JSONのみ出力してください。', queryOpts);
-      const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const result = JSON.parse(jsonMatch[0]);
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    currentKeys = Object.keys(graph.nodes);
+    if (currentKeys.length < 2) break;
 
-        // Apply merges
-        const merges = Array.isArray(result.merge) ? result.merge : [];
-        for (const m of merges) {
-          const fromKey = normalizeKey(m.from);
-          const intoKey = normalizeKey(m.into);
-          if (!fromKey || !intoKey || fromKey === intoKey) continue;
-          if (!graph.nodes[fromKey] || !graph.nodes[intoKey]) continue;
+    // Count edges per node
+    const edgeCounts = {};
+    for (const k of currentKeys) edgeCounts[k] = 0;
+    for (const e of graph.edges) {
+      if (edgeCounts[e.from] !== undefined) edgeCounts[e.from]++;
+      if (edgeCounts[e.to] !== undefined) edgeCounts[e.to]++;
+    }
 
-          const src = graph.nodes[fromKey];
-          const dst = graph.nodes[intoKey];
+    // Group keywords by common words (tokens) — similar keywords share tokens
+    const tokenToKeys = new Map();
+    for (const k of currentKeys) {
+      const label = (graph.nodes[k].label || k).toLowerCase();
+      // Split on spaces/punctuation for English tokens
+      const tokens = label
+        .replace(/[\(（\)）\[\]]/g, ' ')
+        .split(/[\s\-_\.・、。,]+/)
+        .filter(t => t.length >= 2);
+      // Extract CJK substrings (3+ chars) as additional tokens
+      const cjkMatches = label.match(/[\u3000-\u9fff\uff00-\uffef]{3,}/g);
+      if (cjkMatches) tokens.push(...cjkMatches);
+      for (const t of tokens) {
+        if (!tokenToKeys.has(t)) tokenToKeys.set(t, new Set());
+        tokenToKeys.get(t).add(k);
+      }
+    }
 
-          dst.count = (dst.count || 1) + (src.count || 1);
-          const srcSet = new Set([...(dst.sources || []), ...(src.sources || [])]);
-          dst.sources = [...srcSet].slice(0, 20);
-          const topicSet = new Set([...(dst.topics || []), ...(src.topics || [])]);
-          dst.topics = [...topicSet].slice(0, 10);
-          if (src.description && src.description.length > (dst.description || '').length) {
-            dst.description = src.description;
-          }
-          dst.lastUpdated = new Date().toISOString();
+    // Find clusters: groups of keys sharing tokens, sorted by cluster size (largest first)
+    const visited = new Set();
+    const clusters = [];
+    // Sort tokens by how many keys they touch (descending) — prioritize shared words
+    const sortedTokens = [...tokenToKeys.entries()]
+      .filter(([, keys]) => keys.size >= 2)
+      .sort((a, b) => b[1].size - a[1].size);
 
-          for (const edge of graph.edges) {
-            if (edge.from === fromKey) edge.from = intoKey;
-            if (edge.to === fromKey) edge.to = intoKey;
-          }
-          graph.edges = graph.edges.filter(e => e.from !== e.to);
-          removedLabels.push(src.label || m.from);
-          delete graph.nodes[fromKey];
-          totalMerged++;
-          if (onLog) onLog('debug', `Prune merge: ${m.from} → ${m.into}${m.reason ? ' (' + m.reason + ')' : ''}`);
-        }
-
-        // Remove junk keywords
-        const removes = Array.isArray(result.remove) ? result.remove : [];
-        for (const label of removes) {
-          const key = normalizeKey(label);
-          if (key && graph.nodes[key]) {
-            removedLabels.push(graph.nodes[key].label || label);
-            delete graph.nodes[key];
-            graph.edges = graph.edges.filter(e => e.from !== key && e.to !== key);
-            totalRemoved++;
-            if (onLog) onLog('debug', `Prune remove: ${label}`);
+    for (const [, tokenKeys] of sortedTokens) {
+      // Expand cluster: find all keys connected by shared tokens
+      const cluster = new Set();
+      const queue = [...tokenKeys];
+      while (queue.length > 0) {
+        const k = queue.pop();
+        if (visited.has(k) || cluster.size >= BATCH_SIZE) continue;
+        cluster.add(k);
+        visited.add(k);
+        // Find other keys sharing any token with k
+        const kLabel = (graph.nodes[k]?.label || k).toLowerCase();
+        const kTokens = kLabel.replace(/[\(（\)）\[\]]/g, ' ').split(/[\s\-_\.・、。,]+/).filter(t => t.length >= 2);
+        const kCjk = kLabel.match(/[\u3000-\u9fff\uff00-\uffef]{3,}/g);
+        if (kCjk) kTokens.push(...kCjk);
+        for (const t of kTokens) {
+          const related = tokenToKeys.get(t);
+          if (related) for (const r of related) {
+            if (!visited.has(r) && cluster.size < BATCH_SIZE) queue.push(r);
           }
         }
       }
-    } catch (e) {
-      if (onLog) onLog('debug', `Prune failed: ${e.message}`);
+      if (cluster.size >= 2) clusters.push([...cluster]);
+    }
+
+    // Also add remaining ungrouped keys as one batch (for deletion check)
+    const ungrouped = currentKeys.filter(k => !visited.has(k));
+    if (ungrouped.length > 0) {
+      for (let i = 0; i < ungrouped.length; i += BATCH_SIZE) {
+        const batch = ungrouped.slice(i, i + BATCH_SIZE);
+        if (batch.length >= 2) clusters.push(batch);
+      }
+    }
+
+    if (clusters.length === 0) break;
+
+    const mergedBefore = totalMerged + totalRemoved;
+    if (onLog) onLog('info', `Prune round ${round}/${MAX_ROUNDS}: ${clusters.length} groups, ${currentKeys.length} keywords remaining`);
+
+    for (const cluster of clusters) {
+      // Build keyword list for this cluster
+      const sortedKeywords = cluster
+        .map(k => {
+          const n = graph.nodes[k];
+          if (!n) return null;
+          const conn = edgeCounts[k] || 0;
+          return `- ${n.label} [${n.category || '未分類'}] (調査${n.count || 1}回, 接続${conn}): ${(n.description || '').slice(0, 60)}`;
+        })
+        .filter(Boolean)
+        .join('\n');
+
+      if (!sortedKeywords) continue;
+
+      const prompt = fillPrompt('prune-graph.user', { sortedKeywords });
+      try {
+        const response = await client.query(prompt, 'JSONのみ出力してください。', queryOpts);
+        const text = (response.response || '').trim();
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          applyPruneResult(JSON.parse(jsonMatch[0]));
+        }
+      } catch (e) {
+        if (onLog) onLog('debug', `Prune round ${round} batch failed: ${e.message}`);
+      }
+    }
+
+    const mergedThisRound = (totalMerged + totalRemoved) - mergedBefore;
+    if (onLog) onLog('info', `Prune round ${round}: merged/removed ${mergedThisRound} keywords`);
+
+    // If this round produced no changes, stop early
+    if (mergedThisRound === 0) {
+      if (onLog) onLog('info', `Prune: no changes in round ${round}, stopping early`);
+      break;
     }
   }
 
