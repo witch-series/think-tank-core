@@ -135,7 +135,8 @@ async function updateGraph(client, entry) {
  * Review and reorganize the entire graph via LLM.
  * Merges duplicates, assigns categories, fixes connections.
  */
-async function reviewGraph(client, onLog) {
+async function reviewGraph(client, onLog, options = {}) {
+  const queryOpts = options.model ? { model: options.model } : {};
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 2) {
@@ -160,7 +161,7 @@ async function reviewGraph(client, onLog) {
   const prompt = fillPrompt('review-graph.user', { nodeList, edgeList });
 
   try {
-    const response = await client.query(prompt, 'JSONのみ出力してください。');
+    const response = await client.query(prompt, 'JSONのみ出力してください。', queryOpts);
     const text = (response.response || '').trim();
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return graph;
@@ -514,7 +515,8 @@ function getGraphData() {
  * Sorts keywords alphabetically so similar words cluster together,
  * then asks LLM to identify duplicates in batches.
  */
-async function pruneGraph(client, onLog) {
+async function pruneGraph(client, onLog, options = {}) {
+  const queryOpts = options.model ? { model: options.model } : {};
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 2) {
@@ -523,45 +525,84 @@ async function pruneGraph(client, onLog) {
   }
 
   // Pre-pass: programmatic fuzzy merge for obvious duplicates
-  // Merge keys that are identical after normalization or differ only by punctuation/whitespace
   const prePassMerged = [];
-  const keysByNorm = new Map();
-  for (const k of keys) {
-    if (!graph.nodes[k]) continue;
-    // Normalize more aggressively: remove all non-alphanumeric except CJK
-    const label = (graph.nodes[k].label || k).toLowerCase()
-      .replace(/[\s\-_\.・、。]+/g, '')
+
+  // Helper: merge victim into keeper
+  function mergeNodes(keeper, victim) {
+    if (!graph.nodes[victim] || !graph.nodes[keeper]) return false;
+    const src = graph.nodes[victim];
+    const dst = graph.nodes[keeper];
+    dst.count = (dst.count || 1) + (src.count || 1);
+    const srcSet = new Set([...(dst.sources || []), ...(src.sources || [])]);
+    dst.sources = [...srcSet].slice(0, 20);
+    const topicSet = new Set([...(dst.topics || []), ...(src.topics || [])]);
+    dst.topics = [...topicSet].slice(0, 10);
+    if (src.description && src.description.length > (dst.description || '').length) {
+      dst.description = src.description;
+    }
+    dst.lastUpdated = new Date().toISOString();
+    for (const edge of graph.edges) {
+      if (edge.from === victim) edge.from = keeper;
+      if (edge.to === victim) edge.to = keeper;
+    }
+    graph.edges = graph.edges.filter(e => e.from !== e.to);
+    prePassMerged.push(src.label || victim);
+    delete graph.nodes[victim];
+    return true;
+  }
+
+  // Normalization functions for grouping
+  function normBasic(label) {
+    return label.toLowerCase()
+      .replace(/[\s\-_\.・、。()（）\[\]]+/g, '')
       .replace(/[^a-z0-9\u3000-\u9fff\uff00-\uffef]/g, '');
-    if (!keysByNorm.has(label)) {
-      keysByNorm.set(label, []);
-    }
-    keysByNorm.get(label).push(k);
   }
-  for (const [, group] of keysByNorm) {
-    if (group.length < 2) continue;
-    // Keep the one with the highest count
-    group.sort((a, b) => (graph.nodes[b]?.count || 0) - (graph.nodes[a]?.count || 0));
-    const keeper = group[0];
-    for (let i = 1; i < group.length; i++) {
-      const victim = group[i];
-      if (!graph.nodes[victim] || !graph.nodes[keeper]) continue;
-      const src = graph.nodes[victim];
-      const dst = graph.nodes[keeper];
-      dst.count = (dst.count || 1) + (src.count || 1);
-      const srcSet = new Set([...(dst.sources || []), ...(src.sources || [])]);
-      dst.sources = [...srcSet].slice(0, 20);
-      const topicSet = new Set([...(dst.topics || []), ...(src.topics || [])]);
-      dst.topics = [...topicSet].slice(0, 10);
-      dst.lastUpdated = new Date().toISOString();
-      for (const edge of graph.edges) {
-        if (edge.from === victim) edge.from = keeper;
-        if (edge.to === victim) edge.to = keeper;
+  function normNoBrackets(label) {
+    // Remove parenthetical content: "LoD (Level of Detail)" → "lod"
+    return label.toLowerCase()
+      .replace(/\s*[\(（].*?[\)）]/g, '')
+      .replace(/[\s\-_\.・、。\[\]]+/g, '')
+      .replace(/[^a-z0-9\u3000-\u9fff\uff00-\uffef]/g, '');
+  }
+  function normSorted(label) {
+    // Sort words: "Level of Detail LoD" and "LoD Level of Detail" → same
+    return label.toLowerCase()
+      .replace(/[\(（\)）\[\]]/g, ' ')
+      .split(/[\s\-_\.・、。]+/)
+      .filter(Boolean)
+      .sort()
+      .join('');
+  }
+  function normSingular(label) {
+    // Basic singularization: remove trailing 's'
+    return normBasic(label).replace(/s$/, '');
+  }
+
+  // Run multiple normalization passes to catch different duplicate patterns
+  const normFns = [normBasic, normNoBrackets, normSorted, normSingular];
+  const alreadyMerged = new Set();
+
+  for (const normFn of normFns) {
+    const groups = new Map();
+    for (const k of Object.keys(graph.nodes)) {
+      if (alreadyMerged.has(k)) continue;
+      const norm = normFn(graph.nodes[k].label || k);
+      if (!norm) continue;
+      if (!groups.has(norm)) groups.set(norm, []);
+      groups.get(norm).push(k);
+    }
+    for (const [, group] of groups) {
+      if (group.length < 2) continue;
+      group.sort((a, b) => (graph.nodes[b]?.count || 0) - (graph.nodes[a]?.count || 0));
+      const keeper = group[0];
+      for (let i = 1; i < group.length; i++) {
+        if (mergeNodes(keeper, group[i])) {
+          alreadyMerged.add(group[i]);
+        }
       }
-      graph.edges = graph.edges.filter(e => e.from !== e.to);
-      prePassMerged.push(src.label || victim);
-      delete graph.nodes[victim];
     }
   }
+
   if (prePassMerged.length > 0 && onLog) {
     onLog('info', `Pre-pass: auto-merged ${prePassMerged.length} obvious duplicates`);
   }
@@ -604,7 +645,7 @@ async function pruneGraph(client, onLog) {
     const prompt = fillPrompt('prune-graph.user', { sortedKeywords });
 
     try {
-      const response = await client.query(prompt, 'JSONのみ出力してください。');
+      const response = await client.query(prompt, 'JSONのみ出力してください。', queryOpts);
       const text = (response.response || '').trim();
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {

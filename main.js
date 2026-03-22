@@ -410,9 +410,9 @@ function scheduleAutonomousTasks() {
 
         // Prune similar/duplicate keywords, then review connections
         setPhase('organizing', 'Pruning knowledge graph');
-        await pruneGraph(ollamaClient, log);
+        await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
         setPhase('organizing', 'Reviewing knowledge graph');
-        await reviewGraph(ollamaClient, log);
+        await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
 
         return { action: 'organize', compressed: total };
       }
@@ -732,9 +732,9 @@ function startServer(port) {
           try {
             setPhase('organizing', 'Pruning knowledge graph');
             log('info', 'Graph reorganization started');
-            await pruneGraph(ollamaClient, log);
+            await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
             setPhase('organizing', 'Reviewing knowledge graph');
-            await reviewGraph(ollamaClient, log);
+            await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
             log('info', 'Graph reorganization completed');
           } catch (e) {
             log('error', `Graph reorganization failed: ${e.message}`);
@@ -869,8 +869,8 @@ function start() {
     const count = await processUnindexedEntries(ollamaClient, [researchDir, analysisDir], log);
     if (count > 0) {
       log('info', 'Startup graph prune & review...');
-      await pruneGraph(ollamaClient, log);
-      await reviewGraph(ollamaClient, log);
+      await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+      await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
     }
   }));
 
