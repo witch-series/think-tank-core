@@ -4,6 +4,8 @@
 
 テーマ: {{taskDescription}}
 
+{{goalNote}}
+
 {{visitedNote}}
 
 {{similarNote}}

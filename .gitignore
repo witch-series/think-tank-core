@@ -19,6 +19,7 @@ brain/knowledge-db/
 brain/visited-urls.json
 brain/chat-history.json
 brain/knowledge-graph.json
+brain/graph-score-history.json
 
 # Summary files (generated)
 *.summary.json

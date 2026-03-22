@@ -317,6 +317,12 @@ function scheduleAutonomousTasks() {
       recentInsights,
       graphNodeCount: String(graphStats.nodeCount),
       graphEdgeCount: String(graphStats.edgeCount),
+      graphScore: String(graphStats.score || 0),
+      graphRecentScores: graphStats.recentScores || 'なし',
+      graphScoreChange: graphStats.scoreChange > 0 ? `+${graphStats.scoreChange}` : String(graphStats.scoreChange || 0),
+      graphStagnant: graphStats.stagnant ? '⚠️停滞中 — 異なるキーワード・視点で検索すること' : '',
+      graphDensity: String(graphStats.density || 0),
+      graphCategories: String(graphStats.categories || 0),
       topKeywords: graphStats.topKeywords || 'なし',
       underExplored: graphStats.underExplored || 'なし',
       searchSuggestions: graphStats.searchSuggestions || 'なし'
@@ -354,7 +360,8 @@ function scheduleAutonomousTasks() {
         setPhase('searching', searchPrompt.slice(0, 60));
         const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
           workLogDir, onLog: log, mode: 'research',
-          visitedUrls, recentTopics
+          visitedUrls, recentTopics,
+          goalPrompt: config.searchPrompt || ''
         });
 
         if (result.visitedUrls && result.visitedUrls.length > 0) {

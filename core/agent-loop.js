@@ -228,12 +228,18 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
     similarNote = '## 注意: 最近の検索結果が似通っています。関連するが異なる視点のキーワードで検索してください。\n最近のトピック: ' + options.recentTopics.slice(-5).join(', ');
   }
 
+  let goalNote = '';
+  if (options.goalPrompt && options.goalPrompt !== 'なし') {
+    goalNote = '## 最終目標（検索結果がこの目標に関連するようにしてください）\n' + options.goalPrompt;
+  }
+
   // Step 1: Ask LLM for search queries based on the task
   onLog('info', 'Generating search queries...');
   const queryPrompt = fillPrompt('search-queries.user', {
     taskDescription,
     visitedNote,
-    similarNote
+    similarNote,
+    goalNote
   });
 
   const queryResponse = await client.query(queryPrompt);

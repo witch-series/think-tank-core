@@ -388,13 +388,93 @@ function getSuggestedSearchPairs(limit = 3) {
 }
 
 /**
+ * Calculate a numeric score for the graph's quality/growth.
+ * Higher = more developed knowledge graph.
+ * Components: node count, edge count, connectivity density, category diversity.
+ */
+function calculateGraphScore() {
+  const graph = loadGraph();
+  const keys = Object.keys(graph.nodes);
+  const nodeCount = keys.length;
+  const edgeCount = graph.edges.length;
+  if (nodeCount === 0) return { score: 0, nodeCount: 0, edgeCount: 0, density: 0, categories: 0 };
+
+  // Connectivity density: average edges per node
+  const density = nodeCount > 0 ? edgeCount / nodeCount : 0;
+
+  // Category diversity: number of unique categories
+  const cats = new Set(keys.map(k => graph.nodes[k].category).filter(Boolean));
+  const categories = cats.size;
+
+  // Score formula: weighted combination
+  // - Nodes contribute linearly (10 pts each)
+  // - Edges contribute (5 pts each, encourages connections)
+  // - Density bonus (up to 50 pts, encourages well-connected graph)
+  // - Category diversity bonus (20 pts per category, encourages breadth)
+  const score = Math.round(
+    nodeCount * 10 +
+    edgeCount * 5 +
+    Math.min(density, 5) * 10 +
+    categories * 20
+  );
+
+  return { score, nodeCount, edgeCount, density: Math.round(density * 100) / 100, categories };
+}
+
+const SCORE_HISTORY_PATH = path.join(__dirname, '..', 'brain', 'graph-score-history.json');
+
+/**
+ * Record current graph score and return stagnation analysis.
+ * Keeps last 20 scores. Returns whether the graph is stagnating.
+ */
+function recordAndAnalyzeScore() {
+  const current = calculateGraphScore();
+  let history = [];
+  try {
+    if (fs.existsSync(SCORE_HISTORY_PATH)) {
+      history = JSON.parse(fs.readFileSync(SCORE_HISTORY_PATH, 'utf-8'));
+    }
+  } catch {}
+
+  history.push({ score: current.score, timestamp: new Date().toISOString(), ...current });
+  if (history.length > 20) history = history.slice(-20);
+  fs.writeFileSync(SCORE_HISTORY_PATH, JSON.stringify(history, null, 2), 'utf-8');
+
+  // Analyze stagnation: compare last 3 scores
+  let stagnant = false;
+  let scoreChange = 0;
+  let recentScores = '';
+  if (history.length >= 3) {
+    const last3 = history.slice(-3);
+    const oldest = last3[0].score;
+    const newest = last3[2].score;
+    scoreChange = newest - oldest;
+    // Stagnant if score changed by less than 5% over last 3 cycles
+    stagnant = oldest > 0 && Math.abs(scoreChange) / oldest < 0.05;
+    recentScores = last3.map(h => String(h.score)).join(' → ');
+  } else {
+    recentScores = history.map(h => String(h.score)).join(' → ');
+  }
+
+  return {
+    ...current,
+    stagnant,
+    scoreChange,
+    recentScores,
+    historyLength: history.length
+  };
+}
+
+/**
  * Get graph stats for planning prompt.
  */
 function getGraphStats() {
   const graph = loadGraph();
   const nodeCount = Object.keys(graph.nodes).length;
   const edgeCount = graph.edges.length;
-  if (nodeCount === 0) return { nodeCount: 0, edgeCount: 0, underExplored: '', topKeywords: '', searchSuggestions: '' };
+  if (nodeCount === 0) return { nodeCount: 0, edgeCount: 0, underExplored: '', topKeywords: '', searchSuggestions: '', score: 0, stagnant: false, scoreChange: 0, recentScores: '', categories: 0 };
+
+  const scoreAnalysis = recordAndAnalyzeScore();
 
   const underExplored = getUnderExplored(5)
     .map(n => `${n.label}(調査${n.count}回/接続${n.connections})`)
@@ -411,7 +491,15 @@ function getGraphStats() {
     ? pairs.map(p => `「${p.weak}」と「${p.strong}」の関連性`).join(', ')
     : '';
 
-  return { nodeCount, edgeCount, underExplored, topKeywords, searchSuggestions };
+  return {
+    nodeCount, edgeCount, underExplored, topKeywords, searchSuggestions,
+    score: scoreAnalysis.score,
+    stagnant: scoreAnalysis.stagnant,
+    scoreChange: scoreAnalysis.scoreChange,
+    recentScores: scoreAnalysis.recentScores,
+    categories: scoreAnalysis.categories,
+    density: scoreAnalysis.density
+  };
 }
 
 /**
