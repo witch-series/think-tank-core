@@ -9,4 +9,5 @@
 - {"action": "list_files", "path": "ディレクトリ"}
 - {"action": "git_log", "count": 10}
 - {"action": "analyze_code", "path": "ファイルパス"}
+- {"action": "search_code", "pattern": "検索パターン", "path": "ディレクトリ"}
 - {"action": "done"}

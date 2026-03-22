@@ -22,6 +22,8 @@ const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
 const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode } = require('./core/knowledge-graph');
+const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
+const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
 
 const ROOT = __dirname;
@@ -305,6 +307,43 @@ function scheduleAutonomousTasks() {
     const context = collectContext();
     const graphStats = getGraphStats(recentTopics);
 
+    // Goal decomposition: break goal into subtasks if needed
+    const goalText = config.searchPrompt || '';
+    let goalSummary = null;
+    let nextSubtaskInfo = 'なし';
+    let currentSubtask = null;
+
+    if (goalText && goalText !== 'なし') {
+      try {
+        await decomposeGoal(ollamaClient, goalText, {
+          knowledgeCount: context.knowledgeCount,
+          moduleCount,
+          graphNodeCount: graphStats.nodeCount,
+          existingFiles: context.functionList
+        }, { model: ollamaClient.dreamModel });
+
+        // Periodically re-evaluate goal progress
+        if (cycleCount % 5 === 0) {
+          await evaluateProgress(ollamaClient, { model: ollamaClient.dreamModel });
+        }
+
+        goalSummary = getGoalSummary();
+        const { subtask } = getNextSubtask();
+        currentSubtask = subtask;
+        if (subtask) {
+          nextSubtaskInfo = `[${subtask.id}] (${subtask.type}) ${subtask.description}`;
+        }
+      } catch (e) {
+        log('debug', `Goal decomposition failed: ${e.message}`);
+      }
+    }
+
+    const goalProgressStr = goalSummary
+      ? `${goalSummary.progress} (${goalSummary.percentage}%) 完了`
+      : 'ゴール未設定';
+
+    const feedbackStr = getFeedbackSummary() || 'データなし';
+
     const prompt = fillPrompt('plan-next-action.user', {
       cycleCount: String(cycleCount),
       knowledgeCount: String(context.knowledgeCount),
@@ -312,7 +351,10 @@ function scheduleAutonomousTasks() {
       visitedUrlCount: String(visitedUrls.length),
       lastAnalysis: lastAnalysisCycle ? `${cycleCount - lastAnalysisCycle}サイクル前` : '未実施',
       recentActivity: context.recentActivity,
-      userPrompt: config.searchPrompt || 'なし',
+      userPrompt: goalText || 'なし',
+      goalProgress: goalProgressStr,
+      nextSubtask: nextSubtaskInfo,
+      feedbackSummary: feedbackStr,
       recentTopics: recentTopics.slice(-10).join(', ') || 'なし',
       recentInsights,
       graphNodeCount: String(graphStats.nodeCount),
@@ -320,7 +362,7 @@ function scheduleAutonomousTasks() {
       graphScore: String(graphStats.score || 0),
       graphRecentScores: graphStats.recentScores || 'なし',
       graphScoreChange: graphStats.scoreChange > 0 ? `+${graphStats.scoreChange}` : String(graphStats.scoreChange || 0),
-      graphStagnant: graphStats.stagnant ? '⚠️停滞中 — 異なるキーワード・視点で検索すること' : '',
+      graphStagnant: graphStats.stagnant ? '停滞中 — 異なるキーワード・視点で検索すること' : '',
       graphDensity: String(graphStats.density || 0),
       graphCategories: String(graphStats.categories || 0),
       topKeywords: graphStats.topKeywords || 'なし',
@@ -375,162 +417,281 @@ function scheduleAutonomousTasks() {
       }
     }
 
+    // If LLM chose an action type that has been unreliable, fall back
+    if (isActionUnreliable(action) && action !== 'research' && action !== 'idle') {
+      log('info', `Action "${action}" has high failure rate, falling back to research`);
+      action = 'research';
+    }
+
+    // Mark current subtask as in_progress if the action matches
+    if (currentSubtask && currentSubtask.status === 'pending') {
+      updateSubtask(currentSubtask.id, { status: 'in_progress' });
+    }
+
     log('info', `Autonomous decision: ${action}${topic ? ` (${topic.slice(0, 50)})` : ''} — ${reason.slice(0, 60)}`);
     setPhase(action, topic || reason.slice(0, 60));
 
     // Execute the chosen action
-    switch (action) {
-      case 'research':
-      case 'deep_research': {
-        // Use topic from plan if provided, otherwise user's searchPrompt
-        const searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
+    let actionResult;
+    let actionSuccess = false;
+    let actionReason = '';
 
-        setPhase('searching', searchPrompt.slice(0, 60));
-        const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
-          workLogDir, onLog: log, mode: 'research',
-          visitedUrls, recentTopics,
-          goalPrompt: config.searchPrompt || ''
-        });
+    try {
+      switch (action) {
+        case 'research':
+        case 'deep_research': {
+          const searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
 
-        if (result.visitedUrls && result.visitedUrls.length > 0) {
-          addVisitedUrls(result.visitedUrls);
-        }
-
-        // Don't save empty/interrupted results
-        if (result.empty) {
-          log('debug', 'Research cycle produced no data (possibly interrupted)');
-          setPhase('idle');
-          return result;
-        }
-
-        const hasData = (result.insights && result.insights.length > 0) ||
-                        (result.summary && result.summary.length > 10);
-        if (hasData) {
-          setPhase('saving', 'Research results');
-          const entry = {
-            topic: topic || searchPrompt.slice(0, 50),
-            insights: result.insights || [],
-            summary: result.summary || '',
-            sources: result.sources || []
-          };
-          saveKnowledge(researchDbPath, 'research', entry);
-          log('info', `Research saved: ${(result.insights || []).length} insights`);
-
-          // Update knowledge graph (fire-and-forget)
-          updateGraph(ollamaClient, entry).catch(e =>
-            log('debug', `Graph update failed: ${e.message}`)
-          );
-        }
-        return result;
-      }
-
-      case 'organize': {
-        setPhase('organizing', 'Compressing knowledge');
-        log('info', 'Organizing knowledge...');
-        const r1 = await compressKnowledge(ollamaClient, researchDbPath);
-        const r2 = await compressKnowledge(ollamaClient, analysisDbPath);
-        const total = [...(r1.compressed || []), ...(r2.compressed || [])];
-        if (total.length > 0) {
-          log('info', `Compressed: ${total.map(c => `${c.file} ${c.before}→${c.after}`).join(', ')}`);
-        } else {
-          log('info', 'No compression needed');
-        }
-
-        // Prune similar/duplicate keywords, then review connections
-        setPhase('organizing', 'Pruning knowledge graph');
-        await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
-        setPhase('organizing', 'Reviewing knowledge graph');
-        await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
-
-        return { action: 'organize', compressed: total };
-      }
-
-      case 'generate_script': {
-        const knowledge = getNewKnowledge(researchDbPath, 48);
-        const researchEntries = knowledge.filter(k =>
-          (Array.isArray(k.insights) && k.insights.length > 0) || (k.summary && k.summary.length > 20)
-        );
-        if (researchEntries.length === 0) {
-          log('info', 'No knowledge available for script generation');
-          return { skipped: true };
-        }
-
-        // Use topic if specified, otherwise pick most recent
-        let entry;
-        if (topic) {
-          entry = researchEntries.find(e => e.topic && e.topic.includes(topic)) || researchEntries[researchEntries.length - 1];
-        } else {
-          entry = researchEntries[researchEntries.length - 1];
-        }
-
-        const entryTopic = topic || entry.topic || 'utility';
-        setPhase('generating', entryTopic);
-        log('info', `Generating script: ${entryTopic}`);
-        const result = await generateModule(ollamaClient, entryTopic, entry, modulesDir);
-
-        if (result.success) {
-          log('info', `Script generated: ${path.basename(result.file)}`);
-        } else if (!result.skipped) {
-          log('info', `Script generation failed: ${result.reason}`);
-        }
-        return result;
-      }
-
-      case 'analyze_code': {
-        lastAnalysisCycle = cycleCount;
-        setPhase('analyzing', 'Codebase analysis');
-        log('info', 'Analyzing codebase...');
-        const result = await runAgentLoop(ollamaClient,
-          'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
-          workLogDir, onLog: log, mode: 'analyze', targetFolders: folders
-        });
-
-        const hasData = (result.insights && result.insights.length > 0) ||
-                        (result.summary && result.summary.length > 10);
-        if (hasData) {
-          saveKnowledge(analysisDbPath, 'analysis', {
-            topic: 'コードベース解析',
-            insights: result.insights || [],
-            summary: result.summary || '',
-            sources: result.sources || []
+          setPhase('searching', searchPrompt.slice(0, 60));
+          const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
+            workLogDir, onLog: log, mode: 'research',
+            visitedUrls, recentTopics,
+            goalPrompt: config.searchPrompt || ''
           });
-          log('info', `Analysis saved: ${(result.insights || []).length} findings`);
+
+          if (result.visitedUrls && result.visitedUrls.length > 0) {
+            addVisitedUrls(result.visitedUrls);
+          }
+
+          if (result.empty) {
+            log('debug', 'Research cycle produced no data (possibly interrupted)');
+            setPhase('idle');
+            actionReason = 'no data';
+            actionResult = result;
+            break;
+          }
+
+          const hasData = (result.insights && result.insights.length > 0) ||
+                          (result.summary && result.summary.length > 10);
+          if (hasData) {
+            setPhase('saving', 'Research results');
+            const entry = {
+              topic: topic || searchPrompt.slice(0, 50),
+              insights: result.insights || [],
+              summary: result.summary || '',
+              sources: result.sources || []
+            };
+            saveKnowledge(researchDbPath, 'research', entry);
+            log('info', `Research saved: ${(result.insights || []).length} insights`);
+            actionSuccess = true;
+            actionReason = `${(result.insights || []).length} insights`;
+
+            updateGraph(ollamaClient, entry).catch(e =>
+              log('debug', `Graph update failed: ${e.message}`)
+            );
+          }
+          actionResult = result;
+          break;
         }
-        return result;
+
+        case 'develop': {
+          const devTask = topic || (currentSubtask ? currentSubtask.description : '');
+          if (!devTask) {
+            log('info', 'No development task specified');
+            actionResult = { skipped: true };
+            break;
+          }
+
+          setPhase('developing', devTask.slice(0, 60));
+          log('info', `Developing: ${devTask.slice(0, 80)}`);
+
+          const goalCtx = goalSummary
+            ? `目標: ${goalSummary.finalGoal}\n進捗: ${goalSummary.progress}\nサブタスク:\n${goalSummary.subtasks.map(t => `  [${t.status}] ${t.description}`).join('\n')}`
+            : '';
+
+          const result = await runAgentLoop(ollamaClient, devTask, ROOT, {
+            workLogDir, onLog: log, mode: 'develop',
+            goalContext: goalCtx,
+            model: ollamaClient.dreamModel
+          });
+
+          const devHasData = (result.insights && result.insights.length > 0) ||
+                             (result.summary && result.summary.length > 10);
+          if (devHasData) {
+            saveKnowledge(analysisDbPath, 'development', {
+              topic: devTask.slice(0, 50),
+              insights: result.insights || [],
+              summary: result.summary || '',
+              sources: result.sources || []
+            });
+            actionSuccess = true;
+            actionReason = result.summary ? result.summary.slice(0, 100) : 'completed';
+          }
+          actionResult = result;
+          break;
+        }
+
+        case 'execute': {
+          const execTask = topic || '';
+          if (!execTask) {
+            log('info', 'No execution task specified');
+            actionResult = { skipped: true };
+            break;
+          }
+
+          setPhase('executing', execTask.slice(0, 60));
+          log('info', `Executing: ${execTask.slice(0, 80)}`);
+
+          // Use develop mode for execution tasks (has exec_command tool)
+          const result = await runAgentLoop(ollamaClient, execTask, ROOT, {
+            workLogDir, onLog: log, mode: 'develop',
+            model: ollamaClient.dreamModel
+          });
+
+          actionSuccess = !result.empty;
+          actionReason = result.summary ? result.summary.slice(0, 100) : '';
+          actionResult = result;
+          break;
+        }
+
+        case 'organize': {
+          setPhase('organizing', 'Compressing knowledge');
+          log('info', 'Organizing knowledge...');
+          const r1 = await compressKnowledge(ollamaClient, researchDbPath);
+          const r2 = await compressKnowledge(ollamaClient, analysisDbPath);
+          const total = [...(r1.compressed || []), ...(r2.compressed || [])];
+          if (total.length > 0) {
+            log('info', `Compressed: ${total.map(c => `${c.file} ${c.before}→${c.after}`).join(', ')}`);
+          } else {
+            log('info', 'No compression needed');
+          }
+
+          setPhase('organizing', 'Pruning knowledge graph');
+          await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+          setPhase('organizing', 'Reviewing knowledge graph');
+          await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+
+          actionSuccess = true;
+          actionReason = `compressed ${total.length} files`;
+          actionResult = { action: 'organize', compressed: total };
+          break;
+        }
+
+        case 'generate_script': {
+          const knowledge = getNewKnowledge(researchDbPath, 48);
+          const researchEntries = knowledge.filter(k =>
+            (Array.isArray(k.insights) && k.insights.length > 0) || (k.summary && k.summary.length > 20)
+          );
+          if (researchEntries.length === 0) {
+            log('info', 'No knowledge available for script generation');
+            actionResult = { skipped: true };
+            break;
+          }
+
+          let entry;
+          if (topic) {
+            entry = researchEntries.find(e => e.topic && e.topic.includes(topic)) || researchEntries[researchEntries.length - 1];
+          } else {
+            entry = researchEntries[researchEntries.length - 1];
+          }
+
+          const entryTopic = topic || entry.topic || 'utility';
+          setPhase('generating', entryTopic);
+          log('info', `Generating script: ${entryTopic}`);
+          const result = await generateModule(ollamaClient, entryTopic, entry, modulesDir);
+
+          if (result.success) {
+            log('info', `Script generated: ${path.basename(result.file)}`);
+            actionSuccess = true;
+            actionReason = path.basename(result.file);
+          } else if (!result.skipped) {
+            log('info', `Script generation failed: ${result.reason}`);
+            actionReason = result.reason;
+          }
+          actionResult = result;
+          break;
+        }
+
+        case 'analyze_code': {
+          lastAnalysisCycle = cycleCount;
+          setPhase('analyzing', 'Codebase analysis');
+          log('info', 'Analyzing codebase...');
+          const result = await runAgentLoop(ollamaClient,
+            'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
+            workLogDir, onLog: log, mode: 'analyze', targetFolders: folders
+          });
+
+          const hasData = (result.insights && result.insights.length > 0) ||
+                          (result.summary && result.summary.length > 10);
+          if (hasData) {
+            saveKnowledge(analysisDbPath, 'analysis', {
+              topic: 'コードベース解析',
+              insights: result.insights || [],
+              summary: result.summary || '',
+              sources: result.sources || []
+            });
+            log('info', `Analysis saved: ${(result.insights || []).length} findings`);
+            actionSuccess = true;
+            actionReason = `${(result.insights || []).length} findings`;
+          }
+          actionResult = result;
+          break;
+        }
+
+        case 'improve_code': {
+          const allFiles = [];
+          for (const folder of folders) {
+            allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
+          }
+          if (allFiles.length === 0) {
+            log('info', 'No files to improve');
+            actionResult = { skipped: true };
+            break;
+          }
+
+          const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
+          const relPath = path.relative(ROOT, targetFile);
+          setPhase('improving', relPath);
+          log('info', `Improving: ${relPath}`);
+          const proposal = await proposeRefactor(ollamaClient, targetFile);
+
+          if (proposal.refactoredCode) {
+            const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode, folders);
+            if (result.success) {
+              log('info', `Refactor applied: ${relPath}`);
+              actionSuccess = true;
+              actionReason = relPath;
+            } else {
+              log('info', `Refactor skipped: ${result.reason}`);
+              actionReason = result.reason;
+            }
+            actionResult = result;
+          } else {
+            actionResult = { suggestions: proposal.suggestions };
+          }
+          break;
+        }
+
+        case 'idle':
+        default:
+          setPhase('idle');
+          log('info', 'Autonomous cycle: idle (waiting for next cycle)');
+          actionSuccess = true;
+          actionResult = { action: 'idle' };
+          break;
       }
-
-      case 'improve_code': {
-        const allFiles = [];
-        for (const folder of folders) {
-          allFiles.push(...scanDirectory(path.resolve(ROOT, folder)));
-        }
-        if (allFiles.length === 0) {
-          log('info', 'No files to improve');
-          return { skipped: true };
-        }
-
-        const targetFile = allFiles[Math.floor(Math.random() * allFiles.length)];
-        const relPath = path.relative(ROOT, targetFile);
-        setPhase('improving', relPath);
-        log('info', `Improving: ${relPath}`);
-        const proposal = await proposeRefactor(ollamaClient, targetFile);
-
-        if (proposal.refactoredCode) {
-          const result = await applyRefactor(ROOT, targetFile, proposal.refactoredCode, folders);
-          if (result.success) log('info', `Refactor applied: ${relPath}`);
-          else log('info', `Refactor skipped: ${result.reason}`);
-          return result;
-        }
-        return { suggestions: proposal.suggestions };
-      }
-
-      case 'idle':
-      default:
-        setPhase('idle');
-        log('info', 'Autonomous cycle: idle (waiting for next cycle)');
-        return { action: 'idle' };
+    } catch (e) {
+      log('error', `Action "${action}" failed: ${e.message}`);
+      actionReason = e.message;
     }
+
+    // Record feedback
+    recordOutcome(action, topic || '', actionSuccess, actionReason);
+
+    // Update subtask status based on result
+    if (currentSubtask) {
+      if (actionSuccess) {
+        updateSubtask(currentSubtask.id, {
+          status: 'completed',
+          result: actionReason.slice(0, 200)
+        });
+        log('info', `Subtask completed: ${currentSubtask.id} — ${currentSubtask.description.slice(0, 50)}`);
+      }
+      // If failed, status stays in_progress for retry (max 3 attempts handled by getNextSubtask)
+    }
+
     setPhase('idle');
+    return actionResult;
   }));
 }
 
@@ -784,6 +945,19 @@ function startServer(port) {
         log('info', `Graph node delete: ${key} → ${ok ? 'deleted' : 'not found'}`);
         res.end(JSON.stringify({ deleted: ok, key }));
 
+      } else if (method === 'GET' && url.pathname === '/goals') {
+        const summary = getGoalSummary();
+        const { subtask, progress } = getNextSubtask();
+        res.end(JSON.stringify({
+          summary,
+          nextSubtask: subtask,
+          progress
+        }));
+
+      } else if (method === 'GET' && url.pathname === '/feedback') {
+        const { getStats } = require('./core/feedback-tracker');
+        res.end(JSON.stringify(getStats()));
+
       } else {
         res.statusCode = 404;
         res.end(JSON.stringify({ error: 'Not found' }));
@@ -879,10 +1053,11 @@ function start() {
   const researchDir = path.resolve(ROOT, 'brain', 'research');
   const analysisDir = path.resolve(ROOT, 'brain', 'analysis');
   const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
-  if (!fs.existsSync(modulesDir)) fs.mkdirSync(modulesDir, { recursive: true });
-  if (!fs.existsSync(researchDir)) fs.mkdirSync(researchDir, { recursive: true });
-  if (!fs.existsSync(analysisDir)) fs.mkdirSync(analysisDir, { recursive: true });
-  if (!fs.existsSync(workLogDir)) fs.mkdirSync(workLogDir, { recursive: true });
+  const scriptsDir = path.resolve(ROOT, 'brain', 'scripts');
+  const outputDir = path.resolve(ROOT, 'brain', 'output');
+  for (const dir of [modulesDir, researchDir, analysisDir, workLogDir, scriptsDir, outputDir]) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  }
 
   // Start task manager
   taskManager.queue = [];

@@ -20,6 +20,10 @@ brain/visited-urls.json
 brain/chat-history.json
 brain/knowledge-graph.json
 brain/graph-score-history.json
+brain/goals.json
+brain/feedback.json
+brain/scripts/
+brain/output/
 
 # Summary files (generated)
 *.summary.json

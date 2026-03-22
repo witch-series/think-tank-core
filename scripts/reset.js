@@ -21,7 +21,7 @@ function clearDir(dirPath) {
   return count;
 }
 
-const dirs = ['brain/research', 'brain/analysis', 'brain/work-logs', 'brain/modules'];
+const dirs = ['brain/research', 'brain/analysis', 'brain/work-logs', 'brain/modules', 'brain/scripts', 'brain/output'];
 
 for (const dir of dirs) {
   const absPath = path.resolve(ROOT, dir);
@@ -29,7 +29,7 @@ for (const dir of dirs) {
   console.log(`Cleared: ${dir} (${count} files)`);
 }
 
-for (const file of ['brain/visited-urls.json', 'brain/chat-history.json', 'brain/knowledge-graph.json', 'brain/graph-score-history.json']) {
+for (const file of ['brain/visited-urls.json', 'brain/chat-history.json', 'brain/knowledge-graph.json', 'brain/graph-score-history.json', 'brain/goals.json', 'brain/feedback.json']) {
   const absPath = path.resolve(ROOT, file);
   if (fs.existsSync(absPath)) {
     fs.unlinkSync(absPath);

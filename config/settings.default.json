@@ -9,7 +9,8 @@
     "port": 2500
   },
   "searchPrompt": "あなたはリサーチアシスタントです。与えられたトピックについて調査し、「課題」「行動」「残課題」「可能性」を抽出してください。",
-  "targetFolders": ["./brain/modules"],
+  "_searchPromptHelp": "searchPromptはシステムの最終目標です。リサーチだけでなく、コード開発やテストなど、あらゆるアクションがこの目標に向けて実行されます。",
+  "targetFolders": ["./brain/modules", "./brain/scripts"],
   "dreamHour": 5,
   "taskInterval": 60000,
   "maxConcurrentTasks": 1,

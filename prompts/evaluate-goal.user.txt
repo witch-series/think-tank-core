@@ -1,0 +1,24 @@
+最終目標:
+{{goal}}
+
+完了済みタスク:
+{{completed}}
+
+失敗したタスク（代替案が必要）:
+{{failed}}
+
+未着手タスク:
+{{pending}}
+
+失敗したタスクについて、別のアプローチで代替タスクを提案してください。
+
+必ず以下のJSON形式だけで回答してください:
+{
+  "replacements": [
+    {
+      "replaces": "goal-N",
+      "description": "新しいタスク内容",
+      "type": "research|develop|test|analyze"
+    }
+  ]
+}

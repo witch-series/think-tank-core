@@ -5,8 +5,9 @@ const path = require('path');
 const { execFile } = require('child_process');
 // OllamaClient is passed as parameter to LLM-calling functions
 const { searchWeb, fetchPage, searchArxiv } = require('../explorers/searcher');
-const { sanitizeText } = require('./evolution');
+const { sanitizeText, containsSensitiveData } = require('./evolution');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
+const { validateSyntax } = require('../lib/sandbox');
 
 const MAX_GATHER_STEPS = 6;
 
@@ -157,6 +158,106 @@ async function executeTool(action, repoPath, workLogDir) {
         const functions = extractFunctionsSimple(code);
         const imports = (code.match(/require\(['"]([^'"]+)['"]\)/g) || []).map(m => m.match(/['"]([^'"]+)['"]/)[1]);
         return { path: action.path, lines: code.split('\n').length, functions, imports, preview: code.slice(0, 1000) };
+      }
+      case 'write_file': {
+        if (!action.path) return { error: 'path is required' };
+        if (!action.content && action.content !== '') return { error: 'content is required' };
+        const filePath = path.resolve(repoPath, action.path);
+        if (!filePath.startsWith(repoPath)) return { error: 'Access denied' };
+        // Block writing outside allowed directories
+        const relPath = path.relative(repoPath, filePath);
+        const allowedPrefixes = ['brain/', 'scripts/', 'output/'];
+        const isAllowed = allowedPrefixes.some(p => relPath.replace(/\\/g, '/').startsWith(p));
+        if (!isAllowed) return { error: `Writing to ${relPath} is not allowed. Allowed: ${allowedPrefixes.join(', ')}` };
+        // Check for sensitive data
+        const sensitive = containsSensitiveData(action.content);
+        if (sensitive.length > 0) return { error: 'Content contains sensitive data' };
+        // Validate JS syntax if it's a .js file
+        if (filePath.endsWith('.js')) {
+          const syntaxCheck = validateSyntax(action.content);
+          if (!syntaxCheck.valid) return { error: `Syntax error: ${syntaxCheck.error}` };
+        }
+        const dir = path.dirname(filePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(filePath, action.content, 'utf-8');
+        return { path: action.path, written: true, size: action.content.length };
+      }
+      case 'edit_file': {
+        if (!action.path) return { error: 'path is required' };
+        if (!action.search) return { error: 'search string is required' };
+        if (action.replace === undefined) return { error: 'replace string is required' };
+        const filePath = path.resolve(repoPath, action.path);
+        if (!filePath.startsWith(repoPath)) return { error: 'Access denied' };
+        const relPath = path.relative(repoPath, filePath);
+        const allowedPrefixes = ['brain/', 'scripts/', 'output/'];
+        const isAllowed = allowedPrefixes.some(p => relPath.replace(/\\/g, '/').startsWith(p));
+        if (!isAllowed) return { error: `Editing ${relPath} is not allowed. Allowed: ${allowedPrefixes.join(', ')}` };
+        if (!fs.existsSync(filePath)) return { error: `File not found: ${action.path}` };
+        let content = fs.readFileSync(filePath, 'utf-8');
+        if (!content.includes(action.search)) return { error: 'Search string not found in file' };
+        content = content.replace(action.search, action.replace);
+        if (filePath.endsWith('.js')) {
+          const syntaxCheck = validateSyntax(content);
+          if (!syntaxCheck.valid) return { error: `Edit would cause syntax error: ${syntaxCheck.error}` };
+        }
+        fs.writeFileSync(filePath, content, 'utf-8');
+        return { path: action.path, edited: true };
+      }
+      case 'exec_command': {
+        if (!action.command) return { error: 'command is required' };
+        // Only allow safe commands
+        const cmd = action.command.trim();
+        const blockedPatterns = [/rm\s+-rf/, /del\s+\//, /format\s+/, /mkfs/, /shutdown/, /reboot/];
+        for (const p of blockedPatterns) {
+          if (p.test(cmd)) return { error: `Command blocked for safety: ${cmd}` };
+        }
+        return new Promise((resolve) => {
+          const { exec } = require('child_process');
+          exec(cmd, { cwd: repoPath, timeout: 30000, maxBuffer: 1024 * 256 }, (err, stdout, stderr) => {
+            if (err) {
+              resolve({ command: cmd, exitCode: err.code, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) });
+            } else {
+              resolve({ command: cmd, exitCode: 0, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 500) });
+            }
+          });
+        });
+      }
+      case 'search_code': {
+        if (!action.pattern) return { error: 'pattern is required' };
+        const searchDir = path.resolve(repoPath, action.path || '.');
+        if (!searchDir.startsWith(repoPath)) return { error: 'Access denied' };
+        const results = [];
+        const searchPattern = action.pattern.toLowerCase();
+
+        function searchInDir(dir, depth) {
+          if (depth > 4 || results.length >= 20) return;
+          let entries;
+          try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+          for (const entry of entries) {
+            if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              searchInDir(fullPath, depth + 1);
+            } else if (entry.isFile() && /\.(js|json|txt|md|html|css)$/.test(entry.name)) {
+              try {
+                const content = fs.readFileSync(fullPath, 'utf-8');
+                const lines = content.split('\n');
+                for (let i = 0; i < lines.length && results.length < 20; i++) {
+                  if (lines[i].toLowerCase().includes(searchPattern)) {
+                    results.push({
+                      file: path.relative(repoPath, fullPath),
+                      line: i + 1,
+                      text: lines[i].trim().slice(0, 200)
+                    });
+                  }
+                }
+              } catch {}
+            }
+          }
+        }
+
+        searchInDir(searchDir, 0);
+        return { pattern: action.pattern, matches: results };
       }
       case 'done':
         return { done: true };
@@ -504,8 +605,105 @@ async function gatherGeneric(client, taskDescription, repoPath, workLogDir, onLo
     } else if (action.action === 'analyze_code' && toolResult.functions) {
       contentForSummary = `${toolResult.lines}行, 関数: ${toolResult.functions.join(', ')}\n${toolResult.preview}`;
       summary = `${toolResult.lines}行, ${toolResult.functions.length}関数`;
+    } else if (action.action === 'search_code' && toolResult.matches) {
+      contentForSummary = toolResult.matches.map(m => `${m.file}:${m.line}: ${m.text}`).join('\n');
+      summary = `${toolResult.matches.length}件`;
+    } else if (action.action === 'exec_command') {
+      contentForSummary = (toolResult.stdout || toolResult.stderr || '').slice(0, 2000);
+      summary = `exit=${toolResult.exitCode}`;
     } else if (toolResult.error) {
       summary = `エラー: ${toolResult.error.slice(0, 50)}`;
+    }
+
+    executedActions.push({ action: action.action, detail: detail.slice(0, 80), summary });
+    if (contentForSummary) {
+      collectedData.push({ type: action.action, source: detail.slice(0, 100), content: contentForSummary });
+    }
+  }
+
+  return { collectedData, executedActions };
+}
+
+/**
+ * Gather data and execute actions for development tasks.
+ * Uses LLM tool calls with the full tool set including write_file, exec_command, etc.
+ */
+async function gatherDevelop(client, taskDescription, repoPath, workLogDir, onLog, options = {}) {
+  const recentLogs = loadRecentWorkLogs(workLogDir);
+  const systemPrompt = loadPrompt('gather-develop.system');
+  const MAX_DEV_STEPS = 10;
+
+  const collectedData = [];
+  const executedActions = [];
+  let consecutiveFailures = 0;
+
+  for (let i = 0; i < MAX_DEV_STEPS; i++) {
+    let prompt = `# タスク\n${taskDescription}\n\n`;
+
+    if (options.goalContext) {
+      prompt += `# ゴール進捗\n${options.goalContext}\n\n`;
+    }
+
+    if (recentLogs) prompt += `# 過去の作業メモ\n${recentLogs}\n\n`;
+
+    if (executedActions.length > 0) {
+      prompt += `# 実行済みアクション\n`;
+      for (const ea of executedActions) {
+        prompt += `- ${ea.action}(${ea.detail}) → ${ea.summary}\n`;
+      }
+      prompt += `\n次のアクションをJSON形式で返してください。完了なら {"action": "done"}\n`;
+    } else {
+      prompt += `最初のアクションをJSON形式で返してください。\n`;
+    }
+
+    const response = await client.query(prompt, systemPrompt, { model: options.model });
+    const action = parseAction((response.response || '').trim());
+
+    if (!action) {
+      consecutiveFailures++;
+      if (consecutiveFailures >= 2) break;
+      continue;
+    }
+    consecutiveFailures = 0;
+    if (action.action === 'done') break;
+
+    const detail = action.query || action.path || action.url || action.command || action.pattern || '';
+    onLog('info', `Dev Agent: ${action.action}${detail ? ` "${detail.slice(0, 60)}"` : ''}`);
+
+    const toolResult = await executeTool(action, repoPath, workLogDir);
+    let contentForSummary = '';
+    let summary = '';
+
+    if (toolResult.error) {
+      summary = `エラー: ${toolResult.error.slice(0, 80)}`;
+      contentForSummary = toolResult.error;
+    } else if (action.action === 'write_file' && toolResult.written) {
+      summary = `${toolResult.size}文字書き込み`;
+      contentForSummary = `Written: ${toolResult.path} (${toolResult.size} chars)`;
+    } else if (action.action === 'edit_file' && toolResult.edited) {
+      summary = '編集成功';
+      contentForSummary = `Edited: ${toolResult.path}`;
+    } else if (action.action === 'exec_command') {
+      summary = `exit=${toolResult.exitCode}`;
+      contentForSummary = (toolResult.stdout || toolResult.stderr || '').slice(0, 2000);
+    } else if (action.action === 'search_code' && toolResult.matches) {
+      summary = `${toolResult.matches.length}件`;
+      contentForSummary = toolResult.matches.map(m => `${m.file}:${m.line}: ${m.text}`).join('\n');
+    } else if (action.action === 'read_file' && toolResult.content) {
+      contentForSummary = toolResult.content.slice(0, 2000);
+      summary = `${toolResult.content.length}文字`;
+    } else if (action.action === 'list_files' && toolResult.items) {
+      contentForSummary = toolResult.items.map(i => `${i.type}: ${i.name}`).join(', ');
+      summary = `${toolResult.items.length}項目`;
+    } else if (action.action === 'search_web' && toolResult.results) {
+      contentForSummary = toolResult.results.map(r => `- ${r.title}: ${r.snippet}`).join('\n');
+      summary = `${toolResult.results.length}件`;
+    } else if (action.action === 'analyze_code' && toolResult.functions) {
+      contentForSummary = `${toolResult.lines}行, 関数: ${toolResult.functions.join(', ')}\n${toolResult.preview}`;
+      summary = `${toolResult.lines}行, ${toolResult.functions.length}関数`;
+    } else if (action.action === 'fetch_page' && toolResult.text) {
+      contentForSummary = toolResult.text.slice(0, 3000);
+      summary = `${toolResult.text.length}文字`;
     }
 
     executedActions.push({ action: action.action, detail: detail.slice(0, 80), summary });
@@ -582,7 +780,7 @@ async function summarizeFindings(client, taskDescription, collectedData, onLog) 
  * @param {import('../lib/ollama-client').OllamaClient} client - Ollama client
  * @param {string} taskDescription - What to investigate
  * @param {string} repoPath - Repository root path
- * @param {object} options - { workLogDir, onLog, mode: 'research'|'analyze'|'generic' }
+ * @param {object} options - { workLogDir, onLog, mode: 'research'|'analyze'|'develop'|'generic' }
  */
 async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   const workLogDir = options.workLogDir || path.join(repoPath, 'brain', 'work-logs');
@@ -598,11 +796,17 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
   if (mode === 'research') {
     gatherResult = await gatherResearch(client, taskDescription, onLog, {
       visitedUrls: options.visitedUrls || [],
-      recentTopics: options.recentTopics || []
+      recentTopics: options.recentTopics || [],
+      goalPrompt: options.goalPrompt
     });
   } else if (mode === 'analyze') {
     const targetFolders = options.targetFolders || ['.'];
     gatherResult = await gatherCodeAnalysis(repoPath, targetFolders, onLog);
+  } else if (mode === 'develop') {
+    gatherResult = await gatherDevelop(client, taskDescription, repoPath, workLogDir, onLog, {
+      goalContext: options.goalContext || '',
+      model: options.model
+    });
   } else {
     gatherResult = await gatherGeneric(client, taskDescription, repoPath, workLogDir, onLog);
   }
