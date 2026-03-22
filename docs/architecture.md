@@ -9,23 +9,33 @@
 │                  統括コア (main.js)               │
 │  TaskManager (EventEmitter) ─ タスクキュー管理     │
 │  LLM自律判断ループ ─ 毎サイクルLLMが行動を決定     │
-│  APIサーバー ─ /status, /logs, /chat, /knowledge  │
+│  GoalManager ─ ゴール分解・サブタスク管理          │
+│  FeedbackTracker ─ アクション成功/失敗の追跡       │
+│  APIサーバー ─ /status, /logs, /chat, /goals, etc │
 │  Dream Phase スケジューラ ─ 毎日 AM 5:00           │
 │  Activity Phase Tracker ─ UI進捗表示用             │
 ├──────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────┐ │
 │  │ 探索ユニット │  │エージェント   │  │自己解析  │ │
 │  │ crawler.js  │  │ agent-loop.js│  │engine   │ │
-│  │ searcher.js │  │ 2フェーズ構成 │  │analyzer │ │
-│  │ verifier.js │  │ gather→sum   │  │sandbox  │ │
+│  │ searcher.js │  │ 4モード構成   │  │analyzer │ │
+│  │ verifier.js │  │ research     │  │sandbox  │ │
+│  │             │  │ analyze      │  │         │ │
+│  │             │  │ develop      │  │         │ │
+│  │             │  │ generic      │  │         │ │
 │  └──────┬──────┘  └──────┬───────┘  └────┬────┘ │
 ├──────────────────────────────────────────────────┤
 │  brain/research (JSONL)  │  brain/analysis (JSONL)│
-│  brain/modules (JS)      │  brain/visited-urls.json│
-│  brain/work-logs         │  Git (.git/)           │
+│  brain/modules (JS)      │  brain/scripts (JS)    │
+│  brain/output            │  brain/work-logs       │
+│  brain/goals.json        │  brain/feedback.json   │
+│  brain/visited-urls.json │  Git (.git/)           │
 ├──────────────────────────────────────────────────┤
 │  prompt-loader.js ─ prompts/ テンプレート管理      │
 │  ollama-client.js ─ マルチURL フェイルオーバー      │
+│  knowledge-graph.js ─ ナレッジグラフ管理            │
+│  goal-manager.js ─ ゴール分解エンジン               │
+│  feedback-tracker.js ─ フィードバック追跡           │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -37,24 +47,45 @@
 
 - `TaskManager` が `EventEmitter` ベースでタスクキューを管理
 - タスク完了時に `idle` イベントを発火し、LLM に次の行動を決定させる
-- LLM が7種類のアクションから最適な行動を選択:
+- LLM が9種類のアクションから最適な行動を選択:
   - `research` — Web検索による情報収集
   - `deep_research` — 特定トピックの深掘り調査
+  - `develop` — コード作成・編集（ゴール駆動）
+  - `execute` — コマンド実行・テスト・検証
   - `organize` — 知識DBの圧縮・整理
   - `generate_script` — 蓄積知識からモジュール生成
   - `analyze_code` — コードベースの解析
   - `improve_code` — targetFolders内コードの改善
   - `idle` — 次のサイクルまで待機
 
-### 2層検索プロンプト
+### ゴール分解エンジン
 
-- **ユーザー指定 `searchPrompt`**: ユーザーのチャットから検出し、`settings.json` に永続化
-- **LLM自律 `autoSearchPrompt`**: LLMが自ら決定する探索方向（メモリ上のみ、再起動で消失）
-- ユーザーの意図とLLMの自律探索が独立に管理される
+**ファイル**: `core/goal-manager.js`
+
+- `searchPrompt` に設定された最終目標をLLM（dreamModel）で5〜10個のサブタスクに分解
+- 各サブタスクにタイプ（research/develop/test/analyze）と依存関係を設定
+- 依存関係を尊重し、実行可能なサブタスクを順に提示
+- 5サイクルごとにゴール進捗を再評価
+- 失敗タスク（3回試行）にはLLMが代替案を自動生成
+- 状態は `brain/goals.json` に永続化
+
+### フィードバック追跡
+
+**ファイル**: `core/feedback-tracker.js`
+
+- 全アクションの成功/失敗を `brain/feedback.json` に記録
+- アクション別の成功率を計算
+- 失敗率60%超のアクションを自動回避
+- LLMのプランニングプロンプトにフィードバックサマリーを提示
+
+### 検索プロンプト
+
+- **ユーザー指定 `searchPrompt`**: システムの最終目標。ユーザーのチャットから検出し、`settings.json` に永続化
+- ゴール分解エンジンがこの目標をサブタスクに分解し、全アクションがこの目標に向けて実行される
 
 ### Activity Phase Tracking
 
-- 現在の処理フェーズ（planning, searching, saving, organizing, generating, analyzing, improving, idle）を追跡
+- 現在の処理フェーズ（planning, searching, saving, organizing, generating, analyzing, improving, developing, executing, idle）を追跡
 - `/status` API で `activity` フィールドとして公開
 - UIのアクティビティバーでリアルタイム表示
 
@@ -99,15 +130,32 @@
 - Content-Length ヘッダ付きリクエスト
 - タイムアウト制御（デフォルト15秒）
 
-### 2フェーズエージェント
+### 4モードエージェント
 
-`agent-loop.js` による情報収集:
+`agent-loop.js` による情報収集・開発:
 
-1. **Gather Phase**: Web検索 → ページ取得 → arxiv検索 → 生データ収集
-   - 訪問済みURLをスキップ（`brain/visited-urls.json` で管理）
-   - 類似トピックの重複検出と検索ワード分岐
-2. **Summarize Phase**: 収集データを LLM で構造化要約
-   - データ未収集（中断含む）時は `{ empty: true }` を返し、知識DBを汚染しない
+1. **research モード**: Web検索 → ページ取得 → arxiv検索 → 生データ収集 → LLM要約
+2. **analyze モード**: プロジェクト構造スキャン → ソースコード解析 → Git履歴収集
+3. **develop モード**: LLM駆動の開発ループ（最大10ステップ）
+   - ファイル読み書き・コード検索・コマンド実行・Web検索を組み合わせ
+   - ゴール進捗をコンテキストとして提示
+   - dreamModel を使用
+4. **generic モード**: LLM がツールを自由に選択（フォールバック）
+
+### 利用可能なツール
+
+| ツール | 説明 | 利用可能モード |
+|-------|------|--------------|
+| `search_web` | Web検索 | research, develop, generic |
+| `fetch_page` | Webページ取得 | research, develop, generic |
+| `read_file` | ファイル読み込み | develop, generic |
+| `list_files` | ディレクトリ一覧 | develop, generic |
+| `write_file` | ファイル作成・上書き | develop |
+| `edit_file` | ファイル部分編集 | develop |
+| `exec_command` | コマンド実行 | develop |
+| `search_code` | コード内検索 | develop, generic |
+| `analyze_code` | コード構造分析 | develop, generic |
+| `git_log` | Gitログ取得 | develop, generic |
 
 ### 2重チェック
 
@@ -128,12 +176,20 @@
 
 ### コード検閲
 
-`configurator.js` が以下をチェック:
+`configurator.js` の `validateCode()` が以下をチェック:
 
-- `eval()` / `new Function()` の使用 → critical
-- 不審な `child_process` 参照 → warning
-- `process.exit()` 呼び出し → warning
-- 行長超過 → info
+| パターン | レベル | 説明 |
+|---------|--------|------|
+| `eval()` | critical | 文字列コード実行 |
+| `new Function()` | critical | 動的関数生成 |
+| `vm.runInNewContext` 等 | critical | VMコード実行 |
+| `child_process` | critical | プロセス生成 |
+| `.exec()` + `require` | critical | コマンド実行 |
+| HTTP write/send/post/fetch | critical | データ送信（外部通信） |
+| `process.exit()` | warning | プロセス終了 |
+| `process.env` | warning | 環境変数アクセス |
+| `fs.unlink/rmdir/rm` | warning | ファイル削除 |
+| 200文字超の行 | info | スタイル違反 |
 
 ### Sandbox 検証
 
@@ -141,7 +197,8 @@
 
 1. **構文チェック** (`validateSyntax`): `vm.Script` による構文検証（実行なし）
 2. **サンドボックス実行** (`runInSandbox`): `vm.createContext` による隔離実行
-   - ホワイトリスト方式の `require`（fs, path, http, https, url, util, stream, os, crypto, child_process, events, buffer, querystring, zlib）
+   - ホワイトリスト方式の `require`（fs, path, http, https, url, util, stream, os, crypto, events, buffer, querystring, zlib）
+   - `child_process` は除外（生成コードからのプロセス生成を防止）
    - `codeGeneration: { strings: false, wasm: false }` で eval/new Function をブロック
    - タイムアウト付き（デフォルト10秒）
 3. **ファイル構文検証** (`testFile`): `node -c` による構文チェック
@@ -161,8 +218,19 @@ Dream Phase で1日1回実行:
 ### 分離ストレージ
 
 - `brain/research/` — Web検索・リサーチ結果（JSONL形式）
-- `brain/analysis/` — コードベース解析結果（JSONL形式）
+- `brain/analysis/` — コードベース解析・開発結果（JSONL形式）
 - 各エントリは `topic`, `insights`, `summary` を含む（タイムスタンプ・ステップ情報は除外）
+
+### ナレッジグラフ
+
+**ファイル**: `core/knowledge-graph.js`
+
+- キーワード（ノード）とその関係性（エッジ）で知識を構造化
+- リサーチ結果からLLMがキーワードを自動抽出
+- グラフスコア（ノード×10 + エッジ×5 + 密度×10 + カテゴリ×20）で品質を定量化
+- 停滞検出: 3サイクルでスコア変化5%未満の場合に警告
+- 多段階プルーニング: プログラム的正規化 → トークンベースクラスタリング → LLM判定（5ラウンド）
+- dreamModel を使用したグラフ再編成
 
 ### 訪問URL追跡
 
@@ -191,22 +259,23 @@ Dream Phase で1日1回実行:
 - 複数URLのフェイルオーバーをサポート
 - 各URLで **3回連続失敗** した場合のみ次のURLに切り替え
 - 生成タイムアウト: 120秒
+- `model`（通常処理） と `dreamModel`（重要判断・ゴール分解・グラフ再編成） の2モデル体制
 - `getStatus()` で現在のURL、失敗カウント、利用可能URLリストを取得
 
 ## 7. セキュリティガード
 
-### targetFolders 制限
+### 多層防御
 
-- LLM による自動編集は `targetFolders`（デフォルト: `brain/modules`）内のファイルのみ許可
-- `applyRefactor()` がパスガードを実施: `path.relative()` でチェック
-- `autoCommit()` も `allowedPaths` のみステージング
-- プロジェクトコア（`core/`, `lib/`, `explorers/`）は自動編集対象外
-
-### 機密データ検出
-
-- コミット前に `containsSensitiveData()` でIPアドレス、パスワード、APIキー、トークンを検出
-- 検出時はコミットをブロック
-- `sanitizeText()` でコミットメッセージからも機密情報を除去
+| レイヤー | 対策 | 適用箇所 |
+|---------|------|---------|
+| コード検閲 | `validateCode()` — eval, child_process, データ送信等を検出 | write_file, edit_file, generateModule, applyRefactor |
+| 構文検証 | `validateSyntax()` + `testFile()` — 二重の構文チェック | write_file, edit_file, generateModule |
+| サンドボックス | `runInSandbox()` — 隔離実行、child_process除外、タイムアウト | generateModule, reviewScripts |
+| パス制限 | `brain/`, `scripts/`, `output/` のみ書き込み許可 | write_file, edit_file |
+| コマンドブロック | 21パターン（rm -rf, powershell, curl\|sh, git push, npm publish 等） | exec_command |
+| コマンド隔離 | `brain/output/` ディレクトリで実行 | exec_command |
+| 機密データ検出 | IP, パスワード, APIキー, トークンを検出 | autoCommit, write_file |
+| targetFolders制限 | `applyRefactor()` がパスガード | improve_code |
 
 ### UI XSS 対策
 

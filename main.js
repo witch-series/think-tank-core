@@ -45,6 +45,45 @@ function log(level, message, data) {
   }
 }
 
+// --- System Documentation for Chat ---
+const DOCS_DIR = path.join(ROOT, 'docs');
+
+function loadSystemDocs() {
+  const docFiles = ['architecture.md', 'technical-specs.md', 'directory-structure.md'];
+  const docs = [];
+  for (const file of docFiles) {
+    const filePath = path.join(DOCS_DIR, file);
+    try {
+      if (fs.existsSync(filePath)) {
+        docs.push(`### ${file}\n${fs.readFileSync(filePath, 'utf-8')}`);
+      }
+    } catch {}
+  }
+  // Also include README
+  const readmePath = path.join(ROOT, 'README.md');
+  try {
+    if (fs.existsSync(readmePath)) {
+      docs.push(`### README.md\n${fs.readFileSync(readmePath, 'utf-8')}`);
+    }
+  } catch {}
+  return docs.join('\n\n---\n\n');
+}
+
+function isSystemQuestion(message) {
+  const patterns = [
+    /このシステム/, /think.?tank/, /仕組み/, /アーキテクチャ/,
+    /どう(やって|動い|なって)/, /機能/, /セキュリティ/,
+    /ゴール分解/, /フィードバック/, /ナレッジグラフ/,
+    /エージェント/, /サンドボックス/, /検閲/,
+    /dream\s*phase/i, /設定/, /API/, /使い方/,
+    /コマンド/, /モード/, /ツール/, /プロンプト/,
+    /自律/, /開発モード/, /リサーチモード/,
+    /how does/i, /what is/i, /explain/i, /architecture/i,
+    /security/i, /how.*work/i, /設計/, /構造/,
+  ];
+  return patterns.some(p => p.test(message));
+}
+
 // --- Chat History ---
 const CHAT_HISTORY_PATH = path.join(ROOT, 'brain', 'chat-history.json');
 const MAX_CHAT_HISTORY = 200;
@@ -854,12 +893,20 @@ function startServer(port) {
           `[${k.topic || 'unknown'}] ${JSON.stringify(k.insights || k).slice(0, 300)}`
         ).join('\n');
 
+        // If user is asking about the system itself, include documentation
+        let systemDocsContext = '';
+        if (isSystemQuestion(message)) {
+          systemDocsContext = loadSystemDocs();
+          log('debug', 'Including system documentation in chat context');
+        }
+
         // Immediate response from existing knowledge
         log('info', `User chat: ${message.slice(0, 80)}`);
         saveChatMessage('user', message);
         try {
           const reply = await chat(ollamaClient, message, {
-            knowledge: knowledgeSummary
+            knowledge: knowledgeSummary,
+            systemDocs: systemDocsContext
           });
 
           saveChatMessage('assistant', reply);

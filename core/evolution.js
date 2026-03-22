@@ -437,9 +437,16 @@ async function generateModule(client, topic, knowledge, modulesDir) {
 async function chat(client, userMessage, context) {
   const systemPrompt = context?.systemPrompt || loadPrompt('chat.system');
 
-  const prompt = context?.knowledge
-    ? `## システムの知識:\n${context.knowledge}\n\n## ユーザーの質問:\n${userMessage}`
-    : userMessage;
+  const parts = [];
+  if (context?.systemDocs) {
+    parts.push(`## このシステムのドキュメント:\n${context.systemDocs}`);
+  }
+  if (context?.knowledge) {
+    parts.push(`## システムの知識:\n${context.knowledge}`);
+  }
+  parts.push(`## ユーザーの質問:\n${userMessage}`);
+
+  const prompt = parts.join('\n\n');
 
   const response = await client.query(prompt, systemPrompt);
   return response.response;
