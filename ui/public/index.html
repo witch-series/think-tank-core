@@ -993,17 +993,18 @@
 
       // Connected keywords
       var connected = [];
+      var gnIdx = graphNodes.indexOf(gn);
       graphEdges.forEach(function(e) {
-        if (e.from === graphNodes.indexOf(gn)) {
-          connected.push({ label: graphNodes[e.to].label, relation: e.relation, weight: e.weight });
-        } else if (e.to === graphNodes.indexOf(gn)) {
-          connected.push({ label: graphNodes[e.from].label, relation: e.relation, weight: e.weight });
+        if (e.from === gnIdx) {
+          connected.push({ idx: e.to, label: graphNodes[e.to].label, relation: e.relation, weight: e.weight });
+        } else if (e.to === gnIdx) {
+          connected.push({ idx: e.from, label: graphNodes[e.from].label, relation: e.relation, weight: e.weight });
         }
       });
       if (connected.length > 0) {
         html += '<div class="gd-section"><h4>Connected Keywords (' + connected.length + ')</h4>';
         connected.forEach(function(c) {
-          html += '<span class="gd-tag" title="' + esc(c.relation) + '">' + esc(c.label) +
+          html += '<span class="gd-tag gd-tag-link" data-node-idx="' + c.idx + '" title="' + esc(c.relation) + '">' + esc(c.label) +
             (c.relation ? ' (' + esc(c.relation) + ')' : '') + '</span>';
         });
         html += '</div>';
@@ -1014,6 +1015,17 @@
 
       body.innerHTML = html;
       panel.style.display = 'block';
+
+      // Bind connected keyword clicks — navigate to that node's detail
+      var tagLinks = body.querySelectorAll('.gd-tag-link');
+      for (var ti = 0; ti < tagLinks.length; ti++) {
+        tagLinks[ti].addEventListener('click', function(ev) {
+          var idx = parseInt(this.getAttribute('data-node-idx'), 10);
+          if (idx >= 0 && idx < graphNodes.length) {
+            showGraphDetail(graphNodes[idx]);
+          }
+        });
+      }
 
       // Bind delete
       var deleteBtn = document.getElementById('graph-delete-btn');
