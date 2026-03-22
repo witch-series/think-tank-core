@@ -314,7 +314,7 @@ async function processUnindexedEntries(client, knowledgeDbPaths, onLog) {
 /**
  * Get under-explored keywords — prioritize nodes with few connections and low count.
  */
-function getUnderExplored(limit = 10) {
+function getUnderExplored(limit = 10, recentTopics = []) {
   const graph = loadGraph();
   const nodes = Object.entries(graph.nodes);
   if (nodes.length === 0) return [];
@@ -327,24 +327,46 @@ function getUnderExplored(limit = 10) {
     if (edgeCounts[e.to] !== undefined) edgeCounts[e.to]++;
   }
 
+  // Build a set of recently searched labels (lowercase) for penalty
+  const recentLower = recentTopics.map(t => t.toLowerCase());
+
   const now = Date.now();
   const scored = nodes.map(([key, node]) => {
     const age = (now - new Date(node.lastUpdated || node.firstSeen).getTime()) / (1000 * 60 * 60);
     const connections = edgeCounts[key] || 0;
-    // Fewer connections + lower count + older = higher priority
-    const score = (1 / (connections + 1)) * (1 / (node.count || 1)) * (1 + age / 24);
-    return { key, label: node.label, description: node.description, count: node.count, connections, score };
+    const count = node.count || 1;
+    const label = (node.label || '').toLowerCase();
+
+    // Penalize keywords that appear in recent search topics
+    const recentPenalty = recentLower.some(t => t.includes(label) || label.includes(t)) ? 0.01 : 1;
+    // Penalize over-researched keywords (diminishing returns beyond 10)
+    const countPenalty = 1 / (1 + Math.log2(count));
+
+    const score = (1 / (connections + 1)) * countPenalty * (1 + age / 24) * recentPenalty;
+    return { key, label: node.label, description: node.description, category: node.category || '', count, connections, score };
   });
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit);
+
+  // Ensure category diversity: don't return more than 2 from same category
+  const result = [];
+  const catCount = {};
+  for (const item of scored) {
+    if (result.length >= limit) break;
+    const cat = item.category || 'other';
+    catCount[cat] = (catCount[cat] || 0) + 1;
+    if (catCount[cat] <= 2) {
+      result.push(item);
+    }
+  }
+  return result;
 }
 
 /**
  * Get weakly-connected keyword pairs: pick isolated nodes and suggest
  * a well-connected node to search together, so the LLM can find bridges.
  */
-function getSuggestedSearchPairs(limit = 3) {
+function getSuggestedSearchPairs(limit = 3, recentTopics = []) {
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 4) return [];
@@ -357,9 +379,15 @@ function getSuggestedSearchPairs(limit = 3) {
     if (edgeCounts[e.to] !== undefined) edgeCounts[e.to]++;
   }
 
-  // Separate weak (0-1 edges) and strong (3+ edges) nodes
-  const weak = keys.filter(k => edgeCounts[k] <= 1)
-    .sort((a, b) => (edgeCounts[a] || 0) - (edgeCounts[b] || 0));
+  const recentLower = recentTopics.map(t => t.toLowerCase());
+  function isRecent(k) {
+    const label = (graph.nodes[k]?.label || '').toLowerCase();
+    return recentLower.some(t => t.includes(label) || label.includes(t));
+  }
+
+  // Separate weak (0-1 edges) and strong (2+ edges), excluding recently searched
+  const weak = keys.filter(k => edgeCounts[k] <= 1 && !isRecent(k))
+    .sort((a, b) => (graph.nodes[a]?.count || 0) - (graph.nodes[b]?.count || 0)); // least researched first
   const strong = keys.filter(k => edgeCounts[k] >= 2)
     .sort((a, b) => (edgeCounts[b] || 0) - (edgeCounts[a] || 0));
 
@@ -369,13 +397,24 @@ function getSuggestedSearchPairs(limit = 3) {
   const connected = new Set();
   for (const e of graph.edges) connected.add(e.from + '|' + e.to);
 
+  // Try to pair weak nodes with strong nodes from DIFFERENT categories
   const pairs = [];
+  const usedCategories = new Set();
   for (const w of weak) {
     if (pairs.length >= limit) break;
-    // Find a strong node not already connected
-    const partner = strong.find(s =>
-      !connected.has(w + '|' + s) && !connected.has(s + '|' + w)
+    const wCat = graph.nodes[w]?.category || '';
+    if (usedCategories.has(wCat) && wCat) continue; // different categories each time
+
+    const partner = strong.find(s => {
+      if (connected.has(w + '|' + s) || connected.has(s + '|' + w)) return false;
+      if (isRecent(s)) return false;
+      // Prefer different category for cross-domain discovery
+      const sCat = graph.nodes[s]?.category || '';
+      return sCat !== wCat || !wCat;
+    }) || strong.find(s =>
+      !connected.has(w + '|' + s) && !connected.has(s + '|' + w) && !isRecent(s)
     );
+
     if (partner) {
       pairs.push({
         weak: graph.nodes[w].label,
@@ -383,6 +422,7 @@ function getSuggestedSearchPairs(limit = 3) {
         weakConnections: edgeCounts[w],
         strongConnections: edgeCounts[partner]
       });
+      if (wCat) usedCategories.add(wCat);
     }
   }
   return pairs;
@@ -469,15 +509,15 @@ function recordAndAnalyzeScore() {
 /**
  * Get graph stats for planning prompt.
  */
-function getGraphStats() {
+function getGraphStats(recentTopics = []) {
   const graph = loadGraph();
   const nodeCount = Object.keys(graph.nodes).length;
   const edgeCount = graph.edges.length;
-  if (nodeCount === 0) return { nodeCount: 0, edgeCount: 0, underExplored: '', topKeywords: '', searchSuggestions: '', score: 0, stagnant: false, scoreChange: 0, recentScores: '', categories: 0 };
+  if (nodeCount === 0) return { nodeCount: 0, edgeCount: 0, underExplored: '', topKeywords: '', searchSuggestions: '', score: 0, stagnant: false, scoreChange: 0, recentScores: '', categories: 0, overResearched: '' };
 
   const scoreAnalysis = recordAndAnalyzeScore();
 
-  const underExplored = getUnderExplored(5)
+  const underExplored = getUnderExplored(5, recentTopics)
     .map(n => `${n.label}(調査${n.count}回/接続${n.connections})`)
     .join(', ');
 
@@ -487,13 +527,21 @@ function getGraphStats() {
     .map(([, n]) => `${n.label}(${n.count}回)`)
     .join(', ');
 
-  const pairs = getSuggestedSearchPairs(3);
+  // Identify over-researched keywords (count > 20) to warn the planner
+  const overResearched = Object.entries(graph.nodes)
+    .filter(([, n]) => (n.count || 0) > 20)
+    .sort((a, b) => (b[1].count || 0) - (a[1].count || 0))
+    .slice(0, 5)
+    .map(([, n]) => `${n.label}(${n.count}回)`)
+    .join(', ');
+
+  const pairs = getSuggestedSearchPairs(3, recentTopics);
   const searchSuggestions = pairs.length > 0
     ? pairs.map(p => `「${p.weak}」と「${p.strong}」の関連性`).join(', ')
     : '';
 
   return {
-    nodeCount, edgeCount, underExplored, topKeywords, searchSuggestions,
+    nodeCount, edgeCount, underExplored, topKeywords, searchSuggestions, overResearched,
     score: scoreAnalysis.score,
     stagnant: scoreAnalysis.stagnant,
     scoreChange: scoreAnalysis.scoreChange,

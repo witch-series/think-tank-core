@@ -21,7 +21,7 @@ const { loadPrompt, fillPrompt } = require('./lib/prompt-loader');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
-const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getGraphStats, getGraphData, deleteNode } = require('./core/knowledge-graph');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode } = require('./core/knowledge-graph');
 const { execSync } = require('child_process');
 
 const ROOT = __dirname;
@@ -303,7 +303,7 @@ function scheduleAutonomousTasks() {
 
     const visitedUrls = loadVisitedUrls();
     const context = collectContext();
-    const graphStats = getGraphStats();
+    const graphStats = getGraphStats(recentTopics);
 
     const prompt = fillPrompt('plan-next-action.user', {
       cycleCount: String(cycleCount),
@@ -313,7 +313,7 @@ function scheduleAutonomousTasks() {
       lastAnalysis: lastAnalysisCycle ? `${cycleCount - lastAnalysisCycle}サイクル前` : '未実施',
       recentActivity: context.recentActivity,
       userPrompt: config.searchPrompt || 'なし',
-      recentTopics: recentTopics.slice(-5).join(', ') || 'なし',
+      recentTopics: recentTopics.slice(-10).join(', ') || 'なし',
       recentInsights,
       graphNodeCount: String(graphStats.nodeCount),
       graphEdgeCount: String(graphStats.edgeCount),
@@ -325,7 +325,8 @@ function scheduleAutonomousTasks() {
       graphCategories: String(graphStats.categories || 0),
       topKeywords: graphStats.topKeywords || 'なし',
       underExplored: graphStats.underExplored || 'なし',
-      searchSuggestions: graphStats.searchSuggestions || 'なし'
+      searchSuggestions: graphStats.searchSuggestions || 'なし',
+      overResearched: graphStats.overResearched || 'なし'
     });
 
     let action = 'research'; // fallback
@@ -345,6 +346,33 @@ function scheduleAutonomousTasks() {
       }
     } catch (e) {
       log('debug', `Plan parsing failed, defaulting to research: ${e.message}`);
+    }
+
+    // --- Topic diversity enforcement ---
+    // If the LLM chose research and the topic overlaps with recent topics, force a different one
+    if ((action === 'research' || action === 'deep_research') && topic) {
+      const topicLower = topic.toLowerCase();
+      const recent10 = recentTopics.slice(-10).map(t => t.toLowerCase());
+      const isDuplicate = recent10.some(rt =>
+        rt.includes(topicLower.slice(0, 15)) || topicLower.includes(rt.slice(0, 15))
+      );
+      if (isDuplicate) {
+        const alternatives = getUnderExplored(10, recentTopics);
+        // Pick a random alternative to avoid always choosing the top-scored one
+        const filtered = alternatives.filter(a => {
+          const aLower = a.label.toLowerCase();
+          return !recent10.some(rt => rt.includes(aLower) || aLower.includes(rt.slice(0, 15)));
+        });
+        if (filtered.length > 0) {
+          const pick = filtered[Math.floor(Math.random() * Math.min(filtered.length, 5))];
+          const goalSuffix = config.searchPrompt && config.searchPrompt !== 'なし'
+            ? ` と ${config.searchPrompt.slice(0, 30)} の関連性`
+            : ' の最新動向';
+          log('info', `Topic diversity: "${topic}" is repetitive, switching to "${pick.label}"`);
+          topic = pick.label + goalSuffix;
+          reason = `多様性確保: ${pick.label}（調査${pick.count}回/接続${pick.connections}）を優先`;
+        }
+      }
     }
 
     log('info', `Autonomous decision: ${action}${topic ? ` (${topic.slice(0, 50)})` : ''} — ${reason.slice(0, 60)}`);
