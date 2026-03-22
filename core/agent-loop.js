@@ -8,6 +8,7 @@ const { searchWeb, fetchPage, searchArxiv } = require('../explorers/searcher');
 const { sanitizeText, containsSensitiveData } = require('./evolution');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 const { validateSyntax } = require('../lib/sandbox');
+const { validateCode } = require('../lib/configurator');
 
 const MAX_GATHER_STEPS = 6;
 
@@ -172,10 +173,12 @@ async function executeTool(action, repoPath, workLogDir) {
         // Check for sensitive data
         const sensitive = containsSensitiveData(action.content);
         if (sensitive.length > 0) return { error: 'Content contains sensitive data' };
-        // Validate JS syntax if it's a .js file
+        // Validate JS files: syntax + security
         if (filePath.endsWith('.js')) {
           const syntaxCheck = validateSyntax(action.content);
           if (!syntaxCheck.valid) return { error: `Syntax error: ${syntaxCheck.error}` };
+          const codeCheck = validateCode(action.content);
+          if (!codeCheck.valid) return { error: `Security issue: ${codeCheck.issues.filter(i => i.severity === 'critical').map(i => i.message).join(', ')}` };
         }
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -196,28 +199,45 @@ async function executeTool(action, repoPath, workLogDir) {
         let content = fs.readFileSync(filePath, 'utf-8');
         if (!content.includes(action.search)) return { error: 'Search string not found in file' };
         content = content.replace(action.search, action.replace);
+        // Validate JS files: syntax + security
         if (filePath.endsWith('.js')) {
           const syntaxCheck = validateSyntax(content);
           if (!syntaxCheck.valid) return { error: `Edit would cause syntax error: ${syntaxCheck.error}` };
+          const codeCheck = validateCode(content);
+          if (!codeCheck.valid) return { error: `Edit would introduce security issue: ${codeCheck.issues.filter(i => i.severity === 'critical').map(i => i.message).join(', ')}` };
         }
         fs.writeFileSync(filePath, content, 'utf-8');
         return { path: action.path, edited: true };
       }
       case 'exec_command': {
         if (!action.command) return { error: 'command is required' };
-        // Only allow safe commands
         const cmd = action.command.trim();
-        const blockedPatterns = [/rm\s+-rf/, /del\s+\//, /format\s+/, /mkfs/, /shutdown/, /reboot/];
+        // Block dangerous commands
+        const blockedPatterns = [
+          /rm\s+-rf/i, /del\s+[/\\]/i, /format\s+/i, /mkfs/i,
+          /shutdown/i, /reboot/i,
+          /curl\s+.*\|\s*(sh|bash)/i, /wget\s+.*\|\s*(sh|bash)/i,
+          /powershell/i, /cmd\s+\/c/i,
+          /net\s+user/i, /net\s+localgroup/i,
+          /reg\s+(add|delete)/i, /schtasks/i,
+          />\s*\/dev\/sd/i, /dd\s+if=/i,
+          /chmod\s+[0-7]*s/i, /chown\s+root/i,
+          /npm\s+publish/i, /git\s+push/i,
+          /ssh\s+/i, /scp\s+/i,
+        ];
         for (const p of blockedPatterns) {
-          if (p.test(cmd)) return { error: `Command blocked for safety: ${cmd}` };
+          if (p.test(cmd)) return { error: `Command blocked for safety: ${cmd.slice(0, 60)}` };
         }
+        // Execute in isolated working directory (brain/output) instead of project root
+        const safeCwd = path.resolve(repoPath, 'brain', 'output');
+        if (!fs.existsSync(safeCwd)) fs.mkdirSync(safeCwd, { recursive: true });
         return new Promise((resolve) => {
           const { exec } = require('child_process');
-          exec(cmd, { cwd: repoPath, timeout: 30000, maxBuffer: 1024 * 256 }, (err, stdout, stderr) => {
+          exec(cmd, { cwd: safeCwd, timeout: 30000, maxBuffer: 1024 * 256 }, (err, stdout, stderr) => {
             if (err) {
-              resolve({ command: cmd, exitCode: err.code, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) });
+              resolve({ command: cmd, exitCode: err.code, stdout: (stdout || '').slice(0, 2000), stderr: (stderr || '').slice(0, 2000) });
             } else {
-              resolve({ command: cmd, exitCode: 0, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 500) });
+              resolve({ command: cmd, exitCode: 0, stdout: (stdout || '').slice(0, 2000), stderr: (stderr || '').slice(0, 500) });
             }
           });
         });
