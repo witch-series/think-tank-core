@@ -1,0 +1,39 @@
+以下のリサーチ結果からキーワードを抽出し、それぞれの関連性を分析してください。
+
+## トピック
+{{topic}}
+
+## サマリー
+{{summary}}
+
+## インサイト
+{{insights}}
+
+## ソースURL
+{{sources}}
+
+以下のJSON形式だけで回答してください:
+{
+  "keywords": [
+    {
+      "keyword": "キーワード名（短く、具体的に）",
+      "description": "このキーワードの簡潔な説明（1-2文）",
+      "category": "分類（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud）",
+      "importance": 1-5
+    }
+  ],
+  "relations": [
+    {
+      "from": "キーワード1",
+      "to": "キーワード2",
+      "relation": "関係の説明（例：の一種、に使われる、と対立する）"
+    }
+  ]
+}
+
+キーワード抽出のルール:
+- 5〜15個のキーワードを抽出する
+- 技術用語、概念、ツール名、方法論など具体的なものを選ぶ
+- 一般的すぎる語（「技術」「情報」等）は避ける
+- 関連性は実際に存在する関係のみ記述する
+- 広告やスポンサーコンテンツに由来するキーワードは除外する

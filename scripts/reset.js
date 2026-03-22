@@ -29,7 +29,7 @@ for (const dir of dirs) {
   console.log(`Cleared: ${dir} (${count} files)`);
 }
 
-for (const file of ['brain/visited-urls.json', 'brain/chat-history.json']) {
+for (const file of ['brain/visited-urls.json', 'brain/chat-history.json', 'brain/knowledge-graph.json']) {
   const absPath = path.resolve(ROOT, file);
   if (fs.existsSync(absPath)) {
     fs.unlinkSync(absPath);

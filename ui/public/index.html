@@ -107,6 +107,17 @@
 
     /* Empty state */
     .empty { color: #666; padding: 20px; text-align: center; font-size: 13px; }
+
+    /* Graph detail panel */
+    #graph-detail h3 { color: #8be9fd; font-size: 14px; margin: 0 0 8px; }
+    #graph-detail .gd-desc { color: #ccc; margin: 6px 0; }
+    #graph-detail .gd-stat { color: #888; font-size: 11px; margin: 2px 0; }
+    #graph-detail .gd-section { margin-top: 10px; padding-top: 8px; border-top: 1px solid #333; }
+    #graph-detail .gd-section h4 { color: #bd93f9; font-size: 12px; margin: 0 0 4px; }
+    #graph-detail .gd-link { display: block; color: #6272a4; text-decoration: none; font-size: 11px; word-break: break-all; margin: 2px 0; }
+    #graph-detail .gd-link:hover { color: #8be9fd; text-decoration: underline; }
+    #graph-detail .gd-tag { display: inline-block; background: #282a36; color: #f1fa8c; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin: 2px 2px 2px 0; cursor: pointer; }
+    #graph-detail .gd-tag:hover { background: #44475a; }
   </style>
 </head>
 <body>
@@ -124,6 +135,7 @@
 
   <div class="tabs">
     <div class="tab active" data-tab="chat">Chat</div>
+    <div class="tab" data-tab="graph">Graph</div>
     <div class="tab" data-tab="summary">Summary</div>
     <div class="tab" data-tab="knowledge">Knowledge DB</div>
     <div class="tab" data-tab="logs">Logs</div>
@@ -137,6 +149,26 @@
       <div class="chat-input">
         <input type="text" id="chat-input" placeholder="メッセージを入力..." />
         <button id="chat-send">Send</button>
+      </div>
+    </div>
+
+    <!-- Graph -->
+    <div id="tab-graph" class="tab-content">
+      <div class="search-bar">
+        <input type="text" id="graph-search" placeholder="キーワードを検索..." />
+        <button id="graph-search-btn">Search</button>
+        <button id="graph-fit-btn" style="background:#333;border-color:#555;">Fit</button>
+        <button id="graph-reorg-btn" style="background:#2a1a3e;border-color:#bd93f9;color:#bd93f9;">Reorganize</button>
+        <span class="result-count" id="graph-search-count"></span>
+      </div>
+      <div style="position: relative; flex: 1; overflow: hidden;">
+        <canvas id="graph-canvas" style="width:100%;height:100%;display:block;"></canvas>
+        <div id="graph-tooltip" style="display:none;position:absolute;background:#1a1a2e;border:1px solid #bd93f9;border-radius:6px;padding:12px;max-width:350px;font-size:12px;color:#e0e0e0;pointer-events:none;z-index:10;box-shadow:0 4px 12px rgba(0,0,0,0.5);"></div>
+        <div id="graph-detail" style="display:none;position:absolute;right:8px;top:8px;width:300px;max-height:calc(100% - 16px);overflow-y:auto;background:#111;border:1px solid #333;border-radius:6px;padding:12px;font-size:12px;z-index:10;">
+          <div id="graph-detail-close" style="float:right;cursor:pointer;color:#ff5555;font-size:16px;line-height:1;">&times;</div>
+          <div id="graph-detail-body"></div>
+        </div>
+        <div style="position:absolute;left:8px;bottom:8px;font-size:11px;color:#666;" id="graph-stats"></div>
       </div>
     </div>
 
@@ -175,7 +207,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
-    let apiUrl = 'http://localhost:3000';
+    let apiUrl = 'http://localhost:2500';
 
     // Configure marked for safe rendering
     if (typeof marked !== 'undefined') {
@@ -203,6 +235,7 @@
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'graph') fetchGraph();
         if (tab.dataset.tab === 'summary') fetchSummary();
         if (tab.dataset.tab === 'knowledge') fetchKnowledgeDB();
       });
@@ -518,6 +551,594 @@
         }
       } catch {}
     }
+
+    // --- Knowledge Graph Visualization ---
+    var graphData = null;
+    var graphNodes = []; // [{key, x, y, vx, vy, r, label, node}]
+    var graphEdges = []; // [{from, to, weight, relation}]
+    var graphCanvas = document.getElementById('graph-canvas');
+    var graphCtx = graphCanvas ? graphCanvas.getContext('2d') : null;
+    var graphAnimId = null;
+    var graphDragging = null;
+    var graphHovered = null;
+    var graphMouseX = 0, graphMouseY = 0;
+    var graphScale = 1, graphOffsetX = 0, graphOffsetY = 0;
+    var graphPanStart = null;
+
+    async function fetchGraph() {
+      try {
+        var res = await fetch(apiUrl + '/knowledge-graph');
+        graphData = await res.json();
+        initGraphLayout();
+      } catch {
+        document.getElementById('graph-stats').textContent = 'Failed to load graph';
+      }
+    }
+
+    function initGraphLayout() {
+      if (!graphData || !graphCanvas) return;
+      var nodes = graphData.nodes || {};
+      var edges = graphData.edges || [];
+      var keys = Object.keys(nodes);
+
+      if (keys.length === 0) {
+        document.getElementById('graph-stats').textContent = 'No keywords yet — run research to build the graph';
+        graphNodes = [];
+        graphEdges = [];
+        if (graphAnimId) { cancelAnimationFrame(graphAnimId); graphAnimId = null; }
+        if (graphCtx) { graphCtx.clearRect(0, 0, graphCanvas.width, graphCanvas.height); }
+        return;
+      }
+
+      var rect = graphCanvas.parentElement.getBoundingClientRect();
+      graphCanvas.width = rect.width * (window.devicePixelRatio || 1);
+      graphCanvas.height = rect.height * (window.devicePixelRatio || 1);
+      graphCanvas.style.width = rect.width + 'px';
+      graphCanvas.style.height = rect.height + 'px';
+
+      var cx = rect.width / 2, cy = rect.height / 2;
+      var maxCount = Math.max(...keys.map(function(k) { return nodes[k].count || 1; }));
+
+      // Compact initial spread — force sim will expand as needed
+      var baseSpread = 60 + keys.length * 5;
+      graphNodes = keys.map(function(k, i) {
+        var n = nodes[k];
+        var angle = (2 * Math.PI * i) / keys.length;
+        return {
+          key: k,
+          x: cx + Math.cos(angle) * baseSpread * (0.5 + Math.random() * 0.5),
+          y: cy + Math.sin(angle) * baseSpread * (0.5 + Math.random() * 0.5),
+          vx: 0, vy: 0,
+          r: 6 + ((n.count || 1) / maxCount) * 18,
+          label: n.label || k,
+          node: n
+        };
+      });
+
+      var nodeIndex = {};
+      graphNodes.forEach(function(n, i) { nodeIndex[n.key] = i; });
+
+      graphEdges = edges.filter(function(e) {
+        return nodeIndex[e.from] !== undefined && nodeIndex[e.to] !== undefined;
+      }).map(function(e) {
+        return { from: nodeIndex[e.from], to: nodeIndex[e.to], weight: e.weight || 1, relation: e.relation || '' };
+      });
+
+      var cats = {};
+      keys.forEach(function(k) { var c = nodes[k].category || 'uncategorized'; cats[c] = (cats[c] || 0) + 1; });
+      var catText = Object.keys(cats).length > 1 ? ' / ' + Object.keys(cats).length + ' categories' : '';
+      document.getElementById('graph-stats').textContent = keys.length + ' keywords / ' + graphEdges.length + ' connections' + catText;
+
+      // Auto-fit: center and scale to show all nodes with padding
+      graphAutoFit(rect.width, rect.height);
+
+      if (!graphAnimId) startGraphAnimation();
+    }
+
+    function graphAutoFit(viewW, viewH) {
+      if (graphNodes.length === 0) { graphScale = 1; graphOffsetX = 0; graphOffsetY = 0; return; }
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (var i = 0; i < graphNodes.length; i++) {
+        var n = graphNodes[i];
+        minX = Math.min(minX, n.x - n.r); maxX = Math.max(maxX, n.x + n.r);
+        minY = Math.min(minY, n.y - n.r); maxY = Math.max(maxY, n.y + n.r);
+      }
+      var gw = maxX - minX + 80;
+      var gh = maxY - minY + 80;
+      graphScale = Math.min(viewW / gw, viewH / gh, 2);
+      graphScale = Math.max(graphScale, 0.15);
+      var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      graphOffsetX = viewW / 2 - cx * graphScale;
+      graphOffsetY = viewH / 2 - cy * graphScale;
+    }
+
+    function startGraphAnimation() {
+      var dpr = window.devicePixelRatio || 1;
+      var cooling = 1.0;
+
+      function tick() {
+        graphAnimId = requestAnimationFrame(tick);
+        if (!graphCtx || graphNodes.length === 0) return;
+
+        var w = graphCanvas.width / dpr;
+        var h = graphCanvas.height / dpr;
+
+        // Compute graph centroid for soft centering
+        var gCenterX = 0, gCenterY = 0;
+        for (var i = 0; i < graphNodes.length; i++) { gCenterX += graphNodes[i].x; gCenterY += graphNodes[i].y; }
+        gCenterX /= graphNodes.length; gCenterY /= graphNodes.length;
+
+        // Force simulation (runs continuously at low intensity after cooldown)
+        var intensity = Math.max(cooling, 0.05);
+        if (cooling > 0.05) cooling *= 0.997;
+
+          // Repulsion between nodes
+          var repulsion = 600 + graphNodes.length * 15;
+          for (var i = 0; i < graphNodes.length; i++) {
+            for (var j = i + 1; j < graphNodes.length; j++) {
+              var a = graphNodes[i], b = graphNodes[j];
+              var dx = b.x - a.x, dy = b.y - a.y;
+              var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+              var force = repulsion / (dist * dist);
+              var fx = dx / dist * force * intensity;
+              var fy = dy / dist * force * intensity;
+              a.vx -= fx; a.vy -= fy;
+              b.vx += fx; b.vy += fy;
+            }
+          }
+
+          // Attraction along edges
+          var idealDist = 80 + graphNodes.length * 1;
+          for (var e = 0; e < graphEdges.length; e++) {
+            var edge = graphEdges[e];
+            var a = graphNodes[edge.from], b = graphNodes[edge.to];
+            var dx = b.x - a.x, dy = b.y - a.y;
+            var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            var force = (dist - idealDist) * 0.004 * intensity;
+            var fx = dx / dist * force;
+            var fy = dy / dist * force;
+            a.vx += fx; a.vy += fy;
+            b.vx -= fx; b.vy -= fy;
+          }
+
+          // Soft center gravity — pulls toward graph centroid, not screen edge
+          // Very gentle: prevents drifting to infinity, doesn't compress
+          for (var i = 0; i < graphNodes.length; i++) {
+            var n = graphNodes[i];
+            if (n === graphDragging) continue;
+            var dxc = gCenterX - n.x, dyc = gCenterY - n.y;
+            var distC = Math.sqrt(dxc * dxc + dyc * dyc) || 1;
+            // Only pull if far from centroid (> 400px)
+            if (distC > 400) {
+              var pull = (distC - 400) * 0.0002 * intensity;
+              n.vx += dxc / distC * pull;
+              n.vy += dyc / distC * pull;
+            }
+            n.vx *= 0.85; n.vy *= 0.85;
+            n.x += n.vx; n.y += n.vy;
+            // No boundary clamping — infinite canvas
+          }
+
+        // Draw
+        graphCtx.save();
+        graphCtx.scale(dpr, dpr);
+        graphCtx.clearRect(0, 0, w, h);
+        graphCtx.save();
+        graphCtx.translate(graphOffsetX, graphOffsetY);
+        graphCtx.scale(graphScale, graphScale);
+
+        // Edges
+        for (var e = 0; e < graphEdges.length; e++) {
+          var edge = graphEdges[e];
+          var a = graphNodes[edge.from], b = graphNodes[edge.to];
+          graphCtx.beginPath();
+          graphCtx.moveTo(a.x, a.y);
+          graphCtx.lineTo(b.x, b.y);
+          graphCtx.strokeStyle = 'rgba(98, 114, 164, ' + Math.min(0.2 + edge.weight * 0.1, 0.8) + ')';
+          graphCtx.lineWidth = Math.min(1 + edge.weight * 0.5, 4);
+          graphCtx.stroke();
+        }
+
+        // Nodes — color by category
+        var categoryColorMap = {
+          programming: { h: 139, s: 70, label: 'Programming' },
+          ai:          { h: 270, s: 75, label: 'AI / ML' },
+          security:    { h: 0,   s: 70, label: 'Security' },
+          web:         { h: 200, s: 70, label: 'Web' },
+          database:    { h: 35,  s: 75, label: 'Database' },
+          network:     { h: 170, s: 65, label: 'Network' },
+          hardware:    { h: 50,  s: 60, label: 'Hardware' },
+          science:     { h: 300, s: 65, label: 'Science' },
+          business:    { h: 90,  s: 60, label: 'Business' },
+          devops:      { h: 25,  s: 70, label: 'DevOps' },
+          mobile:      { h: 330, s: 65, label: 'Mobile' },
+          data:        { h: 180, s: 65, label: 'Data' },
+          design:      { h: 310, s: 60, label: 'Design' },
+          os:          { h: 60,  s: 55, label: 'OS' },
+          cloud:       { h: 210, s: 70, label: 'Cloud' }
+        };
+        var defaultCatColor = { h: 220, s: 40, label: 'Other' };
+
+        // Collect active categories for legend
+        var activeCats = {};
+        for (var i = 0; i < graphNodes.length; i++) {
+          var cat = (graphNodes[i].node.category || '').toLowerCase();
+          if (cat) activeCats[cat] = true;
+        }
+
+        for (var i = 0; i < graphNodes.length; i++) {
+          var n = graphNodes[i];
+          var isHovered = (graphHovered === i);
+          var isMatch = graphSearchMatches.indexOf(i) !== -1;
+
+          var cat = (n.node.category || '').toLowerCase();
+          var cc = categoryColorMap[cat] || defaultCatColor;
+          var dimmed = graphSearchMatches.length > 0 && !isMatch && !isHovered;
+          var saturation = dimmed ? '20%' : (isHovered ? '100%' : cc.s + '%');
+          var lightness = dimmed ? '25%' : (isHovered ? '65%' : (40 + Math.min((n.node.count || 1) * 3, 20)) + '%');
+          graphCtx.beginPath();
+          graphCtx.arc(n.x, n.y, n.r + (isHovered ? 3 : 0), 0, Math.PI * 2);
+          graphCtx.fillStyle = 'hsl(' + cc.h + ',' + saturation + ',' + lightness + ')';
+          graphCtx.fill();
+          if (isMatch) {
+            graphCtx.strokeStyle = '#f1fa8c';
+            graphCtx.lineWidth = 3;
+            graphCtx.stroke();
+          } else if (isHovered) {
+            graphCtx.strokeStyle = '#f8f8f2';
+            graphCtx.lineWidth = 2;
+            graphCtx.stroke();
+          }
+
+          // Label — scale-compensated so text stays readable
+          var fontSize = Math.max(12, 14 / graphScale);
+          graphCtx.fillStyle = dimmed ? 'rgba(248,248,242,0.2)' : (isHovered ? '#f8f8f2' : 'rgba(248,248,242,0.9)');
+          graphCtx.font = (isHovered ? 'bold ' : '') + fontSize + 'px Consolas, Monaco, monospace';
+          graphCtx.textAlign = 'center';
+          graphCtx.fillText(n.label, n.x, n.y - n.r - 6);
+        }
+
+        graphCtx.restore();
+
+        // Draw legend (screen space) — group unknown categories into "Other"
+        var legendEntries = [];
+        var hasOther = false;
+        var legendCats = Object.keys(activeCats);
+        for (var li = 0; li < legendCats.length; li++) {
+          var lcat = legendCats[li];
+          if (categoryColorMap[lcat]) {
+            legendEntries.push({ color: categoryColorMap[lcat], label: categoryColorMap[lcat].label });
+          } else {
+            hasOther = true;
+          }
+        }
+        if (hasOther) {
+          legendEntries.push({ color: defaultCatColor, label: 'Other' });
+        }
+        if (legendEntries.length > 0) {
+          var lx = 10, ly = 14;
+          graphCtx.font = '11px Consolas, Monaco, monospace';
+          graphCtx.textAlign = 'left';
+          for (var li = 0; li < legendEntries.length; li++) {
+            var le = legendEntries[li];
+            graphCtx.fillStyle = 'hsl(' + le.color.h + ',' + le.color.s + '%,50%)';
+            graphCtx.beginPath();
+            graphCtx.arc(lx + 5, ly, 5, 0, Math.PI * 2);
+            graphCtx.fill();
+            graphCtx.fillStyle = '#aaa';
+            graphCtx.fillText(le.label, lx + 14, ly + 4);
+            ly += 18;
+          }
+        }
+
+        graphCtx.restore();
+      }
+      tick();
+    }
+
+    // Graph mouse interaction
+    if (graphCanvas) {
+      function graphScreenToWorld(mx, my) {
+        return { x: (mx - graphOffsetX) / graphScale, y: (my - graphOffsetY) / graphScale };
+      }
+
+      function findNodeAt(mx, my) {
+        var pt = graphScreenToWorld(mx, my);
+        // Check node circles
+        for (var i = graphNodes.length - 1; i >= 0; i--) {
+          var n = graphNodes[i];
+          var dx = pt.x - n.x, dy = pt.y - n.y;
+          if (dx * dx + dy * dy < (n.r + 4) * (n.r + 4)) return i;
+        }
+        // Check label text areas (above each node)
+        var fontSize = Math.max(12, 14 / graphScale);
+        for (var i = graphNodes.length - 1; i >= 0; i--) {
+          var n = graphNodes[i];
+          var labelW = n.label.length * fontSize * 0.55;
+          var labelTop = n.y - n.r - 6 - fontSize;
+          var labelBot = n.y - n.r - 2;
+          if (pt.x > n.x - labelW / 2 && pt.x < n.x + labelW / 2 &&
+              pt.y > labelTop && pt.y < labelBot) return i;
+        }
+        return -1;
+      }
+
+      graphCanvas.addEventListener('mousedown', function(e) {
+        var rect = graphCanvas.getBoundingClientRect();
+        var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        var idx = findNodeAt(mx, my);
+        if (idx >= 0) {
+          graphDragging = graphNodes[idx];
+        } else {
+          graphPanStart = { x: e.clientX, y: e.clientY, ox: graphOffsetX, oy: graphOffsetY };
+        }
+      });
+
+      graphCanvas.addEventListener('mousemove', function(e) {
+        var rect = graphCanvas.getBoundingClientRect();
+        var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        graphMouseX = mx; graphMouseY = my;
+
+        if (graphDragging) {
+          var pt = graphScreenToWorld(mx, my);
+          graphDragging.x = pt.x;
+          graphDragging.y = pt.y;
+          graphDragging.vx = 0; graphDragging.vy = 0;
+        } else if (graphPanStart) {
+          graphOffsetX = graphPanStart.ox + (e.clientX - graphPanStart.x);
+          graphOffsetY = graphPanStart.oy + (e.clientY - graphPanStart.y);
+        } else {
+          var idx = findNodeAt(mx, my);
+          graphHovered = idx >= 0 ? idx : null;
+          graphCanvas.style.cursor = idx >= 0 ? 'pointer' : 'grab';
+
+          // Tooltip
+          var tooltip = document.getElementById('graph-tooltip');
+          if (idx >= 0) {
+            var n = graphNodes[idx];
+            tooltip.innerHTML = '<strong style="color:#8be9fd">' + esc(n.label) + '</strong>' +
+              (n.node.category ? ' <span style="color:#bd93f9">[' + esc(n.node.category) + ']</span>' : '') + '<br>' +
+              '<span style="color:#ccc">' + esc(n.node.description || '') + '</span><br>' +
+              '<span style="color:#888">調査回数: ' + (n.node.count || 1) + '</span>';
+            tooltip.style.display = 'block';
+            tooltip.style.left = Math.min(mx + 15, rect.width - 370) + 'px';
+            tooltip.style.top = Math.min(my + 15, rect.height - 80) + 'px';
+          } else {
+            tooltip.style.display = 'none';
+          }
+        }
+      });
+
+      graphCanvas.addEventListener('mouseup', function() {
+        graphDragging = null;
+        graphPanStart = null;
+      });
+
+      graphCanvas.addEventListener('mouseleave', function() {
+        graphDragging = null;
+        graphPanStart = null;
+        graphHovered = null;
+        document.getElementById('graph-tooltip').style.display = 'none';
+      });
+
+      graphCanvas.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        var rect = graphCanvas.getBoundingClientRect();
+        var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        var delta = e.deltaY > 0 ? 0.9 : 1.1;
+        var newScale = Math.max(0.1, Math.min(5, graphScale * delta));
+        graphOffsetX = mx - (mx - graphOffsetX) * (newScale / graphScale);
+        graphOffsetY = my - (my - graphOffsetY) * (newScale / graphScale);
+        graphScale = newScale;
+      }, { passive: false });
+
+      // Click to show detail panel
+      graphCanvas.addEventListener('click', function(e) {
+        var rect = graphCanvas.getBoundingClientRect();
+        var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        var idx = findNodeAt(mx, my);
+        if (idx >= 0) showGraphDetail(graphNodes[idx]);
+      });
+
+      document.getElementById('graph-detail-close').addEventListener('click', function() {
+        document.getElementById('graph-detail').style.display = 'none';
+      });
+
+      // Prevent clicks on the detail panel from propagating
+      document.getElementById('graph-detail').addEventListener('click', function(e) {
+        e.stopPropagation();
+      });
+      document.getElementById('graph-detail').addEventListener('mousedown', function(e) {
+        e.stopPropagation();
+      });
+      document.getElementById('graph-detail').addEventListener('mouseup', function(e) {
+        e.stopPropagation();
+      });
+    }
+
+    function showGraphDetail(gn) {
+      var n = gn.node;
+      var panel = document.getElementById('graph-detail');
+      var body = document.getElementById('graph-detail-body');
+
+      var html = '<h3>' + esc(gn.label) + '</h3>';
+      if (n.category) html += '<div class="gd-stat" style="color:#bd93f9">カテゴリ: ' + esc(n.category) + '</div>';
+      html += '<div class="gd-desc">' + esc(n.description || 'No description') + '</div>';
+      html += '<div class="gd-stat">調査回数: ' + (n.count || 1) + '</div>';
+      html += '<div class="gd-stat">初回発見: ' + (n.firstSeen || '-').split('T')[0] + '</div>';
+      html += '<div class="gd-stat">最終更新: ' + (n.lastUpdated || '-').split('T')[0] + '</div>';
+
+      // Sources
+      if (Array.isArray(n.sources) && n.sources.length > 0) {
+        html += '<div class="gd-section"><h4>Sources (' + n.sources.length + ')</h4>';
+        n.sources.forEach(function(url) {
+          html += '<a class="gd-link" href="' + esc(url) + '" target="_blank" rel="noopener">' +
+            esc(url.length > 50 ? url.slice(0, 50) + '...' : url) + '</a>';
+        });
+        html += '</div>';
+      }
+
+      // Related topics
+      if (Array.isArray(n.topics) && n.topics.length > 0) {
+        html += '<div class="gd-section"><h4>Related Topics</h4>';
+        n.topics.forEach(function(t) {
+          html += '<span class="gd-tag">' + esc(t) + '</span>';
+        });
+        html += '</div>';
+      }
+
+      // Connected keywords
+      var connected = [];
+      graphEdges.forEach(function(e) {
+        if (e.from === graphNodes.indexOf(gn)) {
+          connected.push({ label: graphNodes[e.to].label, relation: e.relation, weight: e.weight });
+        } else if (e.to === graphNodes.indexOf(gn)) {
+          connected.push({ label: graphNodes[e.from].label, relation: e.relation, weight: e.weight });
+        }
+      });
+      if (connected.length > 0) {
+        html += '<div class="gd-section"><h4>Connected Keywords (' + connected.length + ')</h4>';
+        connected.forEach(function(c) {
+          html += '<span class="gd-tag" title="' + esc(c.relation) + '">' + esc(c.label) +
+            (c.relation ? ' (' + esc(c.relation) + ')' : '') + '</span>';
+        });
+        html += '</div>';
+      }
+
+      // Delete button
+      html += '<div class="gd-section"><button id="graph-delete-btn" style="background:#4a1a1a;color:#ff5555;border:1px solid #ff5555;padding:6px 16px;cursor:pointer;font-family:inherit;font-size:12px;border-radius:4px;width:100%;">このキーワードを削除</button></div>';
+
+      body.innerHTML = html;
+      panel.style.display = 'block';
+
+      // Bind delete
+      var deleteBtn = document.getElementById('graph-delete-btn');
+      if (deleteBtn) {
+        deleteBtn.addEventListener('click', function(ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          var nodeKey = gn.key;
+          var nodeLabel = gn.label;
+          if (!confirm('「' + nodeLabel + '」を削除しますか？\nデータベースからも関連情報が削除されます。')) return;
+          this.disabled = true;
+          this.textContent = '削除中...';
+          var btn = this;
+          fetch(apiUrl + '/knowledge-graph/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: nodeKey })
+          }).then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          }).then(function(data) {
+            if (data.deleted) {
+              panel.style.display = 'none';
+              fetchGraph();
+            } else {
+              alert('削除に失敗しました（key: ' + nodeKey + '）');
+              btn.disabled = false;
+              btn.textContent = 'このキーワードを削除';
+            }
+          }).catch(function(err) {
+            alert('削除エラー: ' + err.message + '\nURL: ' + apiUrl + '/knowledge-graph/delete');
+            btn.disabled = false;
+            btn.textContent = 'このキーワードを削除';
+          });
+        });
+      }
+    }
+
+    // --- Graph Search ---
+    var graphSearchMatches = [];
+
+    function searchGraph() {
+      var query = document.getElementById('graph-search').value.trim().toLowerCase();
+      var countEl = document.getElementById('graph-search-count');
+      graphSearchMatches = [];
+
+      if (!query) {
+        countEl.textContent = '';
+        return;
+      }
+
+      for (var i = 0; i < graphNodes.length; i++) {
+        var n = graphNodes[i];
+        var text = (n.label + ' ' + (n.node.description || '') + ' ' + (n.node.category || '')).toLowerCase();
+        if (text.indexOf(query) !== -1) graphSearchMatches.push(i);
+      }
+
+      countEl.textContent = graphSearchMatches.length + ' hits';
+
+      // Pan to first match
+      if (graphSearchMatches.length > 0) {
+        var target = graphNodes[graphSearchMatches[0]];
+        var rect = graphCanvas.getBoundingClientRect();
+        graphScale = Math.max(graphScale, 0.8);
+        graphOffsetX = rect.width / 2 - target.x * graphScale;
+        graphOffsetY = rect.height / 2 - target.y * graphScale;
+      }
+    }
+
+    document.getElementById('graph-search-btn').addEventListener('click', searchGraph);
+    document.getElementById('graph-search').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') searchGraph();
+    });
+    document.getElementById('graph-fit-btn').addEventListener('click', function() {
+      if (graphNodes.length === 0) return;
+      var rect = graphCanvas.parentElement.getBoundingClientRect();
+      graphAutoFit(rect.width, rect.height);
+    });
+    document.getElementById('graph-reorg-btn').addEventListener('click', function() {
+      var btn = document.getElementById('graph-reorg-btn');
+      if (btn.disabled) return;
+      if (!confirm('グラフを再構成しますか？\n（類似キーワードの統合・接続の見直し・カテゴリ再分類を行います）')) return;
+      btn.disabled = true;
+      btn.textContent = 'Reorganizing...';
+
+      function resetBtn() {
+        btn.disabled = false;
+        btn.textContent = 'Reorganize';
+      }
+
+      fetch(apiUrl + '/knowledge-graph/reorganize', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function() {
+          // Poll status: check if graph-reorg task is running or queued
+          var elapsed = 0;
+          var maxWait = 300000;
+          // Initial delay to let the task start
+          setTimeout(function() {
+            var poll = setInterval(function() {
+              elapsed += 2000;
+              if (elapsed > maxWait) {
+                clearInterval(poll);
+                resetBtn();
+                fetchGraph();
+                return;
+              }
+              fetch(apiUrl + '/status').then(function(r) { return r.json(); }).then(function(s) {
+                var cur = s.taskManager.currentTask || '';
+                var queued = (s.taskManager.queuedTasks || []).join(',');
+                var isRunning = cur.indexOf('graph-reorg') !== -1 || queued.indexOf('graph-reorg') !== -1;
+
+                if (isRunning) {
+                  // Show current phase in button
+                  var act = s.activity || {};
+                  btn.textContent = (act.detail || 'Reorganizing') + '...';
+                } else {
+                  // Task is no longer running/queued — done
+                  clearInterval(poll);
+                  resetBtn();
+                  fetchGraph();
+                }
+              }).catch(function() {});
+            }, 2000);
+          }, 1500);
+        }).catch(function() {
+          resetBtn();
+          alert('再構成の開始に失敗しました');
+        });
+    });
 
     // --- Init ---
     async function init() {

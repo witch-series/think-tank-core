@@ -1,7 +1,6 @@
 {
   "name": "think-tank-core",
   "version": "1.0.0",
-  "private": true,
   "description": "Autonomous research and code generation system powered by Ollama LLMs",
   "main": "main.js",
   "scripts": {
@@ -12,6 +11,6 @@
     "reset": "node scripts/reset.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   }
 }

@@ -21,6 +21,8 @@ const { loadPrompt, fillPrompt } = require('./lib/prompt-loader');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getGraphStats, getGraphData, deleteNode } = require('./core/knowledge-graph');
+const { execSync } = require('child_process');
 
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config', 'settings.json');
@@ -263,8 +265,23 @@ let lastAnalysisCycle = 0;
 function getResearchDbPath() { return path.resolve(ROOT, 'brain', 'research'); }
 function getAnalysisDbPath() { return path.resolve(ROOT, 'brain', 'analysis'); }
 
+function gitPull() {
+  try {
+    const result = execSync('git pull --ff-only', { cwd: ROOT, timeout: 30000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const msg = result.trim();
+    if (msg && msg !== 'Already up to date.') {
+      log('info', `git pull: ${msg.split('\n')[0]}`);
+    }
+  } catch (e) {
+    log('debug', `git pull skipped: ${e.message.split('\n')[0]}`);
+  }
+}
+
 function scheduleAutonomousTasks() {
   cycleCount++;
+
+  // Pull latest code before each cycle
+  gitPull();
 
   // Single task: LLM decides what to do next
   taskManager.enqueue(createTask('autonomous:plan', async () => {
@@ -286,6 +303,7 @@ function scheduleAutonomousTasks() {
 
     const visitedUrls = loadVisitedUrls();
     const context = collectContext();
+    const graphStats = getGraphStats();
 
     const prompt = fillPrompt('plan-next-action.user', {
       cycleCount: String(cycleCount),
@@ -296,7 +314,12 @@ function scheduleAutonomousTasks() {
       recentActivity: context.recentActivity,
       userPrompt: config.searchPrompt || 'なし',
       recentTopics: recentTopics.slice(-5).join(', ') || 'なし',
-      recentInsights
+      recentInsights,
+      graphNodeCount: String(graphStats.nodeCount),
+      graphEdgeCount: String(graphStats.edgeCount),
+      topKeywords: graphStats.topKeywords || 'なし',
+      underExplored: graphStats.underExplored || 'なし',
+      searchSuggestions: graphStats.searchSuggestions || 'なし'
     });
 
     let action = 'research'; // fallback
@@ -349,13 +372,19 @@ function scheduleAutonomousTasks() {
                         (result.summary && result.summary.length > 10);
         if (hasData) {
           setPhase('saving', 'Research results');
-          saveKnowledge(researchDbPath, 'research', {
+          const entry = {
             topic: topic || searchPrompt.slice(0, 50),
             insights: result.insights || [],
             summary: result.summary || '',
             sources: result.sources || []
-          });
+          };
+          saveKnowledge(researchDbPath, 'research', entry);
           log('info', `Research saved: ${(result.insights || []).length} insights`);
+
+          // Update knowledge graph (fire-and-forget)
+          updateGraph(ollamaClient, entry).catch(e =>
+            log('debug', `Graph update failed: ${e.message}`)
+          );
         }
         return result;
       }
@@ -371,6 +400,13 @@ function scheduleAutonomousTasks() {
         } else {
           log('info', 'No compression needed');
         }
+
+        // Prune similar/duplicate keywords, then review connections
+        setPhase('organizing', 'Pruning knowledge graph');
+        await pruneGraph(ollamaClient, log);
+        setPhase('organizing', 'Reviewing knowledge graph');
+        await reviewGraph(ollamaClient, log);
+
         return { action: 'organize', compressed: total };
       }
 
@@ -548,7 +584,7 @@ function startServer(port) {
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (method === 'OPTIONS') { res.end(); return; }
@@ -678,6 +714,41 @@ function startServer(port) {
         entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
         res.end(JSON.stringify(entries.slice(0, count)));
 
+      } else if (method === 'GET' && url.pathname === '/knowledge-graph') {
+        res.end(JSON.stringify(getGraphData()));
+
+      } else if (method === 'POST' && url.pathname === '/knowledge-graph/reorganize') {
+        // Run reorganization directly (not queued) so we can return the result
+        res.end(JSON.stringify({ started: true }));
+        // Execute as a prioritized task
+        taskManager.prioritize(createTask('manual:graph-reorg', async () => {
+          try {
+            setPhase('organizing', 'Pruning knowledge graph');
+            log('info', 'Graph reorganization started');
+            await pruneGraph(ollamaClient, log);
+            setPhase('organizing', 'Reviewing knowledge graph');
+            await reviewGraph(ollamaClient, log);
+            log('info', 'Graph reorganization completed');
+          } catch (e) {
+            log('error', `Graph reorganization failed: ${e.message}`);
+          } finally {
+            setPhase('idle');
+          }
+        }));
+
+      } else if (method === 'POST' && url.pathname === '/knowledge-graph/delete') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const { key } = JSON.parse(body || '{}');
+        if (!key) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'key is required' }));
+          return;
+        }
+        const ok = deleteNode(key);
+        log('info', `Graph node delete: ${key} → ${ok ? 'deleted' : 'not found'}`);
+        res.end(JSON.stringify({ deleted: ok, key }));
+
       } else {
         res.statusCode = 404;
         res.end(JSON.stringify({ error: 'Not found' }));
@@ -785,6 +856,16 @@ function start() {
 
   // Schedule dream phase
   scheduleDream();
+
+  // Index unprocessed knowledge entries into graph on startup
+  taskManager.enqueue(createTask('startup:graph-index', async () => {
+    const count = await processUnindexedEntries(ollamaClient, [researchDir, analysisDir], log);
+    if (count > 0) {
+      log('info', 'Startup graph prune & review...');
+      await pruneGraph(ollamaClient, log);
+      await reviewGraph(ollamaClient, log);
+    }
+  }));
 
   // Seed initial tasks
   scheduleAutonomousTasks();
