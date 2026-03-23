@@ -56,18 +56,18 @@ class TaskManager extends EventEmitter {
     if (!this.running || this.paused) return;
 
     if (this.queue.length === 0) {
-      this.emit('idle');
+      try { this.emit('idle'); } catch {}
       return;
     }
 
     this.currentTask = this.queue.shift();
-    this.emit('task:start', this.currentTask);
+    try { this.emit('task:start', this.currentTask); } catch {}
 
     try {
       const result = await this.currentTask.execute();
-      this.emit('task:complete', { task: this.currentTask, result });
+      try { this.emit('task:complete', { task: this.currentTask, result }); } catch {}
     } catch (err) {
-      this.emit('task:error', { task: this.currentTask, error: err });
+      try { this.emit('task:error', { task: this.currentTask, error: err }); } catch {}
     } finally {
       this.currentTask = null;
       if (this.running && !this.paused) {

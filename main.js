@@ -129,8 +129,31 @@ taskManager.on('idle', () => {
   log('debug', `Queue idle — next autonomous cycle in ${Math.round(interval / 1000)}s`);
   idleTimer = setTimeout(() => {
     idleTimer = null;
-    if (!restarting) scheduleAutonomousTasks();
+    if (!restarting) {
+      try {
+        scheduleAutonomousTasks();
+      } catch (e) {
+        log('error', `Failed to schedule autonomous cycle: ${e.message}`);
+        // Ensure the loop continues even if scheduling itself fails
+        idleTimer = setTimeout(() => {
+          idleTimer = null;
+          if (!restarting) scheduleAutonomousTasks();
+        }, interval);
+      }
+    }
   }, interval);
+});
+
+taskManager.on('task:error', ({ task, error }) => {
+  // Ensure cycle continues after task failure by scheduling next cycle if queue is empty
+  if (taskManager.queue.length === 0 && !idleTimer && !restarting) {
+    const interval = config.taskInterval || 60000;
+    log('debug', `Recovering from task error — next cycle in ${Math.round(interval / 1000)}s`);
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      if (!restarting) scheduleAutonomousTasks();
+    }, interval);
+  }
 });
 
 // --- Helper: visited URL tracking ---
@@ -1179,6 +1202,16 @@ async function main() {
       process.exit(1);
     }
   }
+
+  // Prevent unhandled promise rejections from crashing the process
+  process.on('unhandledRejection', (reason) => {
+    log('error', `Unhandled rejection: ${reason?.message || reason}`);
+  });
+
+  process.on('uncaughtException', (err) => {
+    log('error', `Uncaught exception: ${err.message}`);
+    // Don't exit — try to keep running
+  });
 
   start();
 
