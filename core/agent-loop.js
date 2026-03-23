@@ -9,55 +9,15 @@ const { sanitizeText, containsSensitiveData } = require('./evolution');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 const { validateSyntax } = require('../lib/sandbox');
 const { validateCode } = require('../lib/configurator');
+const { parseJsonSafe } = require('../lib/json-parser');
 
 const MAX_GATHER_STEPS = 6;
-
-// --- JSON extraction helper ---
-
-function extractBalancedJson(text) {
-  const start = text.indexOf('{');
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let prevEscape = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (prevEscape) { prevEscape = false; continue; }
-    if (ch === '\\' && inString) { prevEscape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (ch === '{' || ch === '[') depth++;
-    else if (ch === '}' || ch === ']') {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-/**
- * Parse any JSON object from LLM response text.
- * Looks for balanced JSON with or without "action" field.
- */
-function parseJson(responseText) {
-  const balanced = extractBalancedJson(responseText);
-  if (balanced) {
-    try { return JSON.parse(balanced); } catch {}
-  }
-  const simpleMatches = responseText.match(/\{[^{}]*\}/g);
-  if (simpleMatches) {
-    for (const jsonStr of simpleMatches) {
-      try { return JSON.parse(jsonStr); } catch {}
-    }
-  }
-  return null;
-}
 
 /**
  * Parse a JSON action (object with "action" field) from LLM response.
  */
 function parseAction(responseText) {
-  const obj = parseJson(responseText);
+  const obj = parseJsonSafe(responseText);
   if (obj && obj.action) return obj;
 
   // Fallback: look for any JSON with action field among multiple matches
@@ -367,7 +327,7 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
   const queryText = (queryResponse.response || '').trim();
 
   let queries = [];
-  const parsed = parseJson(queryText);
+  const parsed = parseJsonSafe(queryText);
   if (parsed && parsed.queries && Array.isArray(parsed.queries)) {
     queries = parsed.queries.slice(0, 3);
   }
@@ -460,7 +420,7 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
     const urlPrompt = fillPrompt('search-fallback-urls.user', { taskDescription });
 
     const urlResponse = await client.query(urlPrompt);
-    const urlObj = parseJson((urlResponse.response || '').trim());
+    const urlObj = parseJsonSafe((urlResponse.response || '').trim());
 
     if (urlObj && urlObj.urls && Array.isArray(urlObj.urls)) {
       for (const url of urlObj.urls.slice(0, 4)) {
@@ -774,7 +734,7 @@ async function summarizeFindings(client, taskDescription, collectedData, onLog) 
   const responseText = (response.response || '').trim();
 
   // Try to parse JSON (with or without "action" field)
-  const obj = parseJson(responseText);
+  const obj = parseJsonSafe(responseText);
   if (obj && (obj.summary || obj.insights)) {
     return {
       summary: obj.summary || '',

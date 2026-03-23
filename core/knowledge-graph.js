@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { fillPrompt } = require('../lib/prompt-loader');
+const { parseJsonSafe } = require('../lib/json-parser');
+const { getModelConfig } = require('../lib/model-config');
 
 const GRAPH_PATH = path.join(__dirname, '..', 'brain', 'knowledge-graph.json');
 
@@ -38,11 +40,8 @@ async function updateGraph(client, entry) {
   let relations = [];
 
   try {
-    const response = await client.query(prompt, 'JSONのみ出力してください。');
-    const text = (response.response || '').trim();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
+    const { parsed } = await client.queryForJson(prompt, 'JSONのみ出力してください。');
+    if (parsed) {
       keywords = Array.isArray(parsed.keywords) ? parsed.keywords : [];
       relations = Array.isArray(parsed.relations) ? parsed.relations : [];
     }
@@ -146,29 +145,14 @@ async function reviewGraph(client, onLog, options = {}) {
 
   if (onLog) onLog('info', `Reviewing knowledge graph (${keys.length} nodes, ${graph.edges.length} edges)`);
 
-  // Build node list for prompt
-  const nodeList = keys.map(k => {
-    const n = graph.nodes[k];
-    return `- ${n.label} (${n.count || 1}回, カテゴリ: ${n.category || '未分類'}): ${(n.description || '').slice(0, 80)}`;
-  }).join('\n');
+  // Determine batch size based on model capability
+  const modelConfig = getModelConfig(options.ollamaConfig || { model: client.model });
+  const reviewBatchSize = modelConfig.reviewBatchSize;
 
-  const edgeList = graph.edges.map(e => {
-    const fromLabel = graph.nodes[e.from]?.label || e.from;
-    const toLabel = graph.nodes[e.to]?.label || e.to;
-    return `- ${fromLabel} → ${toLabel}: ${e.relation || '関連'} (重み: ${e.weight || 1})`;
-  }).join('\n') || 'なし';
+  // Helper: apply a single review result to the graph
+  function applyReviewResult(result) {
+    let mergeCount = 0, addCount = 0, removeCount = 0;
 
-  const prompt = fillPrompt('review-graph.user', { nodeList, edgeList });
-
-  try {
-    const response = await client.query(prompt, 'JSONのみ出力してください。', queryOpts);
-    const text = (response.response || '').trim();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return graph;
-
-    const result = JSON.parse(jsonMatch[0]);
-
-    // Apply merges
     const merges = Array.isArray(result.merge) ? result.merge : [];
     for (const m of merges) {
       const fromKey = normalizeKey(m.from);
@@ -178,8 +162,6 @@ async function reviewGraph(client, onLog, options = {}) {
 
       const src = graph.nodes[fromKey];
       const dst = graph.nodes[intoKey];
-
-      // Merge counts, sources, topics
       dst.count = (dst.count || 1) + (src.count || 1);
       const srcSet = new Set([...(dst.sources || []), ...(src.sources || [])]);
       dst.sources = [...srcSet].slice(0, 20);
@@ -190,28 +172,22 @@ async function reviewGraph(client, onLog, options = {}) {
       }
       dst.lastUpdated = new Date().toISOString();
 
-      // Re-point edges from merged node
       for (const edge of graph.edges) {
         if (edge.from === fromKey) edge.from = intoKey;
         if (edge.to === fromKey) edge.to = intoKey;
       }
-      // Remove self-loops
       graph.edges = graph.edges.filter(e => e.from !== e.to);
-
       delete graph.nodes[fromKey];
       if (onLog) onLog('debug', `Graph merge: ${m.from} → ${m.into}`);
+      mergeCount++;
     }
 
-    // Apply categories
     const categories = result.categories || {};
     for (const [label, category] of Object.entries(categories)) {
       const key = normalizeKey(label);
-      if (graph.nodes[key]) {
-        graph.nodes[key].category = category;
-      }
+      if (graph.nodes[key]) graph.nodes[key].category = category;
     }
 
-    // Add new edges
     const addEdges = Array.isArray(result.addEdges) ? result.addEdges : [];
     for (const e of addEdges) {
       const fromKey = normalizeKey(e.from);
@@ -223,10 +199,10 @@ async function reviewGraph(client, onLog, options = {}) {
       );
       if (!exists) {
         graph.edges.push({ from: fromKey, to: toKey, relation: e.relation || '', weight: 1 });
+        addCount++;
       }
     }
 
-    // Remove edges
     const removeEdges = Array.isArray(result.removeEdges) ? result.removeEdges : [];
     for (const e of removeEdges) {
       const fromKey = normalizeKey(e.from);
@@ -234,6 +210,46 @@ async function reviewGraph(client, onLog, options = {}) {
       graph.edges = graph.edges.filter(ex =>
         !((ex.from === fromKey && ex.to === toKey) || (ex.from === toKey && ex.to === fromKey))
       );
+      removeCount++;
+    }
+
+    return { mergeCount, addCount, removeCount };
+  }
+
+  try {
+    let totalMerges = 0, totalAdds = 0, totalRemoves = 0;
+
+    // Split into batches for small models
+    const batches = [];
+    for (let i = 0; i < keys.length; i += reviewBatchSize) {
+      batches.push(keys.slice(i, i + reviewBatchSize));
+    }
+
+    for (const batchKeys of batches) {
+      const nodeList = batchKeys.map(k => {
+        const n = graph.nodes[k];
+        if (!n) return null;
+        return `- ${n.label} (${n.count || 1}回, カテゴリ: ${n.category || '未分類'}): ${(n.description || '').slice(0, 80)}`;
+      }).filter(Boolean).join('\n');
+
+      // Include only edges relevant to this batch
+      const batchKeySet = new Set(batchKeys);
+      const edgeList = graph.edges
+        .filter(e => batchKeySet.has(e.from) || batchKeySet.has(e.to))
+        .map(e => {
+          const fromLabel = graph.nodes[e.from]?.label || e.from;
+          const toLabel = graph.nodes[e.to]?.label || e.to;
+          return `- ${fromLabel} → ${toLabel}: ${e.relation || '関連'} (重み: ${e.weight || 1})`;
+        }).join('\n') || 'なし';
+
+      const prompt = fillPrompt('review-graph.user', { nodeList, edgeList });
+      const { parsed: result } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
+      if (result) {
+        const counts = applyReviewResult(result);
+        totalMerges += counts.mergeCount;
+        totalAdds += counts.addCount;
+        totalRemoves += counts.removeCount;
+      }
     }
 
     // Deduplicate edges (same from/to pair)
@@ -251,7 +267,7 @@ async function reviewGraph(client, onLog, options = {}) {
     saveGraph(graph);
 
     const newKeys = Object.keys(graph.nodes);
-    if (onLog) onLog('info', `Graph review done: ${newKeys.length} nodes, ${graph.edges.length} edges (merged ${merges.length}, +${addEdges.length} edges, -${removeEdges.length} edges)`);
+    if (onLog) onLog('info', `Graph review done: ${newKeys.length} nodes, ${graph.edges.length} edges (merged ${totalMerges}, +${totalAdds} edges, -${totalRemoves} edges)`);
   } catch (e) {
     if (onLog) onLog('debug', `Graph review failed: ${e.message}`);
   }
@@ -691,9 +707,10 @@ async function pruneGraph(client, onLog, options = {}) {
     }
   }
 
-  // --- Multi-round LLM pruning (5 rounds) ---
-  const MAX_ROUNDS = 5;
-  const BATCH_SIZE = 30;
+  // --- Multi-round LLM pruning ---
+  const modelConfig = getModelConfig(options.ollamaConfig || { model: client.model });
+  const MAX_ROUNDS = modelConfig.pruneMaxRounds;
+  const BATCH_SIZE = modelConfig.pruneBatchSize;
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     currentKeys = Object.keys(graph.nodes);
@@ -787,11 +804,9 @@ async function pruneGraph(client, onLog, options = {}) {
 
       const prompt = fillPrompt('prune-graph.user', { sortedKeywords });
       try {
-        const response = await client.query(prompt, 'JSONのみ出力してください。', queryOpts);
-        const text = (response.response || '').trim();
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          applyPruneResult(JSON.parse(jsonMatch[0]));
+        const { parsed } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
+        if (parsed) {
+          applyPruneResult(parsed);
         }
       } catch (e) {
         if (onLog) onLog('debug', `Prune round ${round} batch failed: ${e.message}`);

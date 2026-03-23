@@ -1,6 +1,7 @@
 'use strict';
 
 const { fillPrompt } = require('../lib/prompt-loader');
+const { parseJsonSafe } = require('../lib/json-parser');
 
 /**
  * @param {import('../lib/ollama-client').OllamaClient} client
@@ -13,12 +14,8 @@ async function verify(client, originalInsights, sourceText) {
 
   const response = await client.query(prompt);
 
-  try {
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-  } catch {}
+  const parsed = parseJsonSafe(response.response || '');
+  if (parsed) return parsed;
 
   return {
     verified: false,
@@ -37,12 +34,8 @@ async function extractInsights(client, sourceText, systemPrompt) {
 
   const response = await client.query(prompt, systemPrompt);
 
-  try {
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-  } catch {}
+  const parsed = parseJsonSafe(response.response || '');
+  if (parsed) return parsed;
 
   return {
     raw: response.response,

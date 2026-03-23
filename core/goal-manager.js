@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
+const { parseJsonSafe } = require('../lib/json-parser');
 
 const GOALS_PATH = path.resolve(__dirname, '..', 'brain', 'goals.json');
 
@@ -59,14 +60,8 @@ async function decomposeGoal(client, goalText, context, options = {}) {
   });
 
   const systemPrompt = loadPrompt('decompose-goal.system');
-  const response = await client.query(prompt, systemPrompt, { model: options.model });
-  const text = (response.response || '').trim();
+  const { parsed } = await client.queryForJson(prompt, systemPrompt, { model: options.model });
 
-  let parsed;
-  try {
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
-  } catch {}
 
   if (!parsed || !Array.isArray(parsed.subtasks)) {
     return goals; // Keep existing if LLM fails
@@ -182,11 +177,8 @@ async function evaluateProgress(client, options = {}) {
     });
 
     try {
-      const response = await client.query(prompt, loadPrompt('decompose-goal.system'), { model: options.model });
-      const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+      const { parsed } = await client.queryForJson(prompt, loadPrompt('decompose-goal.system'), { model: options.model });
+      if (parsed) {
         if (parsed.replacements && Array.isArray(parsed.replacements)) {
           // Replace failed tasks with new alternatives
           for (const rep of parsed.replacements) {

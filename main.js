@@ -18,6 +18,8 @@ const { analyzeFolder, analyzeFolderWithLLM, scanDirectory } = require('./lib/an
 const { runAgentLoop } = require('./core/agent-loop');
 const { loadConfig } = require('./lib/configurator');
 const { loadPrompt, fillPrompt } = require('./lib/prompt-loader');
+const { parseJsonSafe } = require('./lib/json-parser');
+const { getModelConfig } = require('./lib/model-config');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
@@ -167,10 +169,8 @@ function detectAndUpdateSearchPrompt(client, userMessage) {
       const systemPrompt = loadPrompt('detect-research-intent.system');
       const response = await client.query(userMessage, systemPrompt);
       const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return;
-
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = parseJsonSafe(text);
+      if (!parsed) return;
       if (parsed.isResearch && parsed.searchPrompt && parsed.searchPrompt !== 'null') {
         // User's chat contains a research directive → update the user-facing searchPrompt
         config.searchPrompt = parsed.searchPrompt;
@@ -208,10 +208,8 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
 
       const response = await client.query(checkPrompt, 'JSONのみ出力してください。');
       const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return;
-
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = parseJsonSafe(text);
+      if (!parsed) return;
       if (!parsed.needsSearch || !parsed.searchQuery) return;
 
       log('info', `Supplementing chat with search: "${parsed.searchQuery.slice(0, 60)}"`);
@@ -416,11 +414,12 @@ function scheduleAutonomousTasks() {
 
     setPhase('planning', 'Deciding next action');
     try {
-      const response = await ollamaClient.query(prompt, loadPrompt('plan-next-action.system'));
-      const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+      const modelConfig = getModelConfig(config.ollama || {});
+      const { parsed } = await ollamaClient.queryForJson(
+        prompt, loadPrompt('plan-next-action.system'),
+        { jsonRetries: modelConfig.jsonRetries }
+      );
+      if (parsed) {
         if (parsed.action) action = parsed.action;
         if (parsed.topic) topic = parsed.topic;
         if (parsed.reason) reason = parsed.reason;

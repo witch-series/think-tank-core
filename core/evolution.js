@@ -7,6 +7,7 @@ const { execFile } = require('child_process');
 const { validateCode } = require('../lib/configurator');
 const { runInSandbox, validateSyntax, testFile } = require('../lib/sandbox');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
+const { parseJsonSafe } = require('../lib/json-parser');
 
 // --- Git helpers ---
 
@@ -209,11 +210,8 @@ async function compressKnowledge(client, knowledgeDbPath) {
     try {
       const response = await client.query(prompt);
       const text = (response.response || '').trim();
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
-
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (!parsed.entries || !Array.isArray(parsed.entries)) continue;
+      const parsed = parseJsonSafe(text);
+      if (!parsed || !parsed.entries || !Array.isArray(parsed.entries)) continue;
 
       // Rewrite the JSONL file with compressed entries
       const compressed = parsed.entries.map(e => {
@@ -251,13 +249,7 @@ async function dreamPhase(client, config, repoPath) {
   const response = await client.query(prompt, null,
     { model: client.dreamModel });
 
-  let analysis;
-  try {
-    const jsonMatch = response.response.match(/\{[\s\S]*\}/);
-    analysis = jsonMatch ? JSON.parse(jsonMatch[0]) : { raw: response.response, nextTasks: [] };
-  } catch {
-    analysis = { raw: response.response, nextTasks: [] };
-  }
+  const analysis = parseJsonSafe(response.response || '') || { raw: response.response, nextTasks: [] };
 
   return {
     timestamp: new Date().toISOString(),
@@ -283,11 +275,7 @@ async function proposeRefactor(client, filePath) {
   const responseText = (response.response || '').trim();
 
   // Try to parse JSON result
-  let result = null;
-  try {
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) result = JSON.parse(jsonMatch[0]);
-  } catch {}
+  let result = parseJsonSafe(responseText);
 
   // If JSON parse failed, try to extract code block as refactored code
   if (!result) {
@@ -362,14 +350,11 @@ async function generateModule(client, topic, knowledge, modulesDir) {
   let suggestedName = '';
 
   const responseText = (response.response || '').trim();
-  try {
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.filename) suggestedName = parsed.filename;
-      if (parsed.code) code = parsed.code;
-    }
-  } catch {}
+  const parsed = parseJsonSafe(responseText);
+  if (parsed) {
+    if (parsed.filename) suggestedName = parsed.filename;
+    if (parsed.code) code = parsed.code;
+  }
 
   // Fallback: extract code block if JSON parse failed
   if (!code) {
@@ -495,11 +480,8 @@ async function reviewScripts(client, modulesDir) {
   try {
     const response = await client.query(prompt, loadPrompt('review-scripts.system'));
     const text = (response.response || '').trim();
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { reviewed: files.length, deleted: 0 };
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    if (!parsed.reviews || !Array.isArray(parsed.reviews)) return { reviewed: files.length, deleted: 0 };
+    const parsed = parseJsonSafe(text);
+    if (!parsed || !parsed.reviews || !Array.isArray(parsed.reviews)) return { reviewed: files.length, deleted: 0 };
 
     for (const review of parsed.reviews) {
       if (!review.keep && review.file) {
