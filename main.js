@@ -19,7 +19,6 @@ const { runAgentLoop } = require('./core/agent-loop');
 const { loadConfig } = require('./lib/configurator');
 const { loadPrompt, fillPrompt } = require('./lib/prompt-loader');
 const { parseJsonSafe } = require('./lib/json-parser');
-const { getModelConfig } = require('./lib/model-config');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
@@ -112,7 +111,6 @@ let ollamaClient = null;
 
 // --- Server & Timer state (for restart) ---
 let httpServer = null;
-let idleTimer = null;
 let dreamTimer = null;
 let restarting = false;
 
@@ -125,28 +123,11 @@ taskManager.on('task:error', ({ task, error }) => log('error', `Task failed: ${t
 
 taskManager.on('idle', () => {
   if (restarting) return;
-  // Immediately schedule the next autonomous cycle without waiting
-  setImmediate(() => {
-    if (!restarting) {
-      try {
-        scheduleAutonomousTasks();
-      } catch (e) {
-        log('error', `Failed to schedule autonomous cycle: ${e.message}`);
-        // Retry after a short delay on failure
-        setTimeout(() => {
-          if (!restarting) scheduleAutonomousTasks();
-        }, 5000);
-      }
-    }
-  });
-});
-
-taskManager.on('task:error', ({ task, error }) => {
-  // Ensure cycle continues after task failure
-  if (taskManager.queue.length === 0 && !restarting) {
-    setImmediate(() => {
-      if (!restarting) scheduleAutonomousTasks();
-    });
+  // Directly enqueue the next cycle — no timers, no delays
+  try {
+    scheduleAutonomousTasks();
+  } catch (e) {
+    log('error', `Failed to schedule autonomous cycle: ${e.message}`);
   }
 });
 
@@ -431,10 +412,8 @@ function scheduleAutonomousTasks() {
 
     setPhase('planning', 'Deciding next action');
     try {
-      const modelConfig = getModelConfig(config.ollama || {});
       const { parsed } = await ollamaClient.queryForJson(
-        prompt, loadPrompt('plan-next-action.system'),
-        { jsonRetries: modelConfig.jsonRetries }
+        prompt, loadPrompt('plan-next-action.system')
       );
       if (parsed) {
         if (parsed.action) action = parsed.action;
@@ -1052,7 +1031,6 @@ function shutdown() {
     restarting = true;
     taskManager.stop();
 
-    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
     if (dreamTimer) { clearTimeout(dreamTimer); dreamTimer = null; }
 
     if (httpServer) {

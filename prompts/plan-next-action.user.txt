@@ -1,47 +1,19 @@
-現在の状態:
-サイクル数: {{cycleCount}}
-蓄積知識数: {{knowledgeCount}} エントリ
-生成済みモジュール数: {{moduleCount}} ファイル
-訪問済みURL数: {{visitedUrlCount}}
-前回のコード解析: {{lastAnalysis}}
-直近のアクティビティ: {{recentActivity}}
+状態:
+サイクル: {{cycleCount}} / 知識: {{knowledgeCount}}件 / モジュール: {{moduleCount}}個 / URL: {{visitedUrlCount}}件
+前回コード解析: {{lastAnalysis}}
+直近: {{recentActivity}}
 
-最終目標（最も重要）:
-{{userPrompt}}
+目標: {{userPrompt}}
+進捗: {{goalProgress}}
+次のサブタスク: {{nextSubtask}}
+実績: {{feedbackSummary}}
 
-ゴール進捗:
-{{goalProgress}}
+グラフ: {{graphNodeCount}}ノード / {{graphEdgeCount}}エッジ / 密度{{graphDensity}} / {{graphCategories}}カテゴリ
+スコア: {{graphScore}} ({{graphRecentScores}}) 変化: {{graphScoreChange}} {{graphStagnant}}
+調査不足: {{underExplored}}
+検索候補: {{searchSuggestions}}
+調査過多（避けること）: {{overResearched}}
+直近トピック（避けること）: {{recentTopics}}
+最新insights: {{recentInsights}}
 
-次に実行すべきサブタスク:
-{{nextSubtask}}
-
-アクション実績:
-{{feedbackSummary}}
-
-ナレッジグラフ:
-キーワード数: {{graphNodeCount}} ノード / {{graphEdgeCount}} エッジ
-接続密度: {{graphDensity}} / カテゴリ数: {{graphCategories}}
-グラフスコア: {{graphScore}} (推移: {{graphRecentScores}})
-スコア変化: {{graphScoreChange}} {{graphStagnant}}
-調査が不足しているキーワード: {{underExplored}}
-接続を増やすべき検索候補: {{searchSuggestions}}
-
-調査過多のキーワード（これらをtopicに含めないこと）:
-{{overResearched}}
-
-直近のリサーチトピック（最新10件。これらと同じ・類似のtopicは避けること）:
-{{recentTopics}}
-
-蓄積知識のサマリー（最新3件のinsights）:
-{{recentInsights}}
-
-検索・開発方針:
-- 最終目標に関連するアクションを選ぶ
-- ゴールのサブタスクが提示されている場合はそれに対応するアクションを選ぶ
-- 開発タスクがある場合はresearchよりdevelopを優先する
-- 直近10件と同じ・類似のtopicは絶対に避ける
-- 調査過多のキーワードは避ける
-- 調査不足のキーワードを優先する
-- 検索候補が提示されている場合はそれを使う
-
-次に実行すべきアクションをJSON形式で回答してください。
+次のアクションをJSON形式で回答してください。

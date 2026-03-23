@@ -70,8 +70,16 @@ class TaskManager extends EventEmitter {
       try { this.emit('task:error', { task: this.currentTask, error: err }); } catch {}
     } finally {
       this.currentTask = null;
+      // Continue processing without delay
       if (this.running && !this.paused) {
-        this._next();
+        // If queue is empty, emit idle so the caller can refill it synchronously
+        if (this.queue.length === 0) {
+          try { this.emit('idle'); } catch {}
+        }
+        // Process next task (may have been enqueued by idle handler)
+        if (this.queue.length > 0) {
+          this._next();
+        }
       }
     }
   }

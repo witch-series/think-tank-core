@@ -1,31 +1,16 @@
-以下はナレッジグラフの現在の状態です。キーワード（ノード）とその関係性（エッジ）を見直してください。
+以下のキーワードと接続を見直してください。
 
-現在のキーワード一覧:
+キーワード:
 {{nodeList}}
 
-現在の接続一覧:
+接続:
 {{edgeList}}
 
-以下の観点で分析し、改善を提案してください:
+指示:
+- 重複キーワード → merge
+- カテゴリ未設定 → categories で設定（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）
+- 関連あるのに未接続 → addEdges
+- 関連薄い接続 → removeEdges
 
-(1) 統合: 同じ概念・技術を指す重複キーワードは必ず統合する。略語違い、言語違い、表記ゆれはすべて統合対象。
-(2) 分類: 各キーワードに適切なカテゴリを割り当てる。
-    カテゴリ一覧: programming / ai / security / web / database / network / hardware / science / business / devops / mobile / data / design / os / cloud / robotics / nlp / computer_vision / graphics
-(3) 新しい接続: 関連するキーワード間に接続がなければ追加する（特に同じ分野内のキーワード間）
-(4) 不要な接続: 実際には関連性が薄い接続があれば削除する
-
-必ず以下のJSON形式だけで回答してください:
-{
-  "merge": [
-    {"from": "統合元キーワード", "into": "統合先キーワード"}
-  ],
-  "categories": {
-    "キーワード名": "カテゴリ名"
-  },
-  "addEdges": [
-    {"from": "キーワード1", "to": "キーワード2", "relation": "関係の説明"}
-  ],
-  "removeEdges": [
-    {"from": "キーワード1", "to": "キーワード2"}
-  ]
-}
+JSON形式だけで回答:
+{"merge": [{"from": "元", "into": "先"}], "categories": {"名前": "カテゴリ"}, "addEdges": [{"from": "A", "to": "B", "relation": "説明"}], "removeEdges": [{"from": "A", "to": "B"}]}
