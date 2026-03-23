@@ -8,6 +8,97 @@ const { getModelConfig } = require('../lib/model-config');
 
 const GRAPH_PATH = path.join(__dirname, '..', 'brain', 'knowledge-graph.json');
 
+// --- Shared keyword quality filter ---
+// Used both at insertion (updateGraph) and pruning (pruneGraph) to prevent
+// generic/junk keywords from entering or persisting in the graph.
+
+const JUNK_PATTERN = /^[\d\s\-_.,:;!?@#$%^&*()=+\[\]{}|\\/<>~`'"…→←↑↓●■▲▼◆★※]+$/;
+
+const TOO_GENERIC_JA = new Set([
+  // 抽象的な概念
+  '情報', '技術', 'システム', 'データ', '処理', '方法', '開発', '研究', '最新', '動向',
+  '概要', 'まとめ', 'その他', '関連', '結果', '内容', '分析', '評価', '特徴', '機能',
+  '環境', '構造', '設計', '実装', '確認', '対応', '管理', '利用', '活用', '提供',
+  '実現', '向上', '改善', '問題', '課題', '目的', '背景', '理由', '意味', '定義',
+  '説明', '解説', '紹介', '比較', '検討', '考察', '観点', '視点', '側面', '要素',
+  // 一般動詞・形容詞由来
+  '対策', '注意', '重要', '必要', '可能', '有効', '基本', '応用', '実践', '具体的',
+  '効果', '影響', '変化', '進化', '成長', '発展', '将来', '今後', '現在', '最近',
+  '世界', '日本', '海外', '国内', '企業', '事例', '例', '種類', '一覧', 'リスト',
+  // ウェブ・記事由来
+  'サイト', 'ページ', '記事', 'ブログ', 'ニュース', 'レポート', 'ガイド', '入門',
+  '初心者', '上級者', 'おすすめ', 'ランキング', '人気', '話題', 'トレンド', '注目',
+  '選び方', '使い方', 'やり方', '始め方', '作り方', 'メリット', 'デメリット',
+  'ポイント', 'コツ', 'まとめ記事', '徹底解説', '完全ガイド',
+  // 数量・程度
+  '多く', '少ない', '高い', '低い', '大きい', '小さい', '良い', '悪い',
+  '全体', '部分', '一部', '主要', '代表的', '典型的', '一般的', '特殊',
+  // 一般的な技術用語（固有名詞ではない）
+  '予測', '最適化', '速度', 'コスト', '信頼性', 'セキュリティ', 'ロボット',
+  '不確実性', '精度', '性能', '推論', '学習', '検出', '認識', '生成', '変換',
+  '統合', '自動化', '可視化', '抽出', '分類', '計算', '接続', '通信', '制御',
+  '予測市場', '実験実行', '材料設計', '動作解析', 'テストケース',
+  // 分野名そのもの
+  '機械学習', 'ディープラーニング', 'コンピュータビジョン', '自然言語処理',
+  'ニューラルネットワーク', '強化学習', '人工知能', 'ロボティクス',
+  'サイバーセキュリティ', 'データサイエンス', 'クラウドコンピューティング',
+  // 曖昧なフレーズ
+  '汎化能力', '汎化問題', 'データ効率', '計算コスト', '計算コスト削減',
+  '推論速度', '推論一貫性', '視覚的変更', 'ビデオコンテンツ',
+  '多様な状況下', '高精度', '高感度', '広い視野', 'リアルタイム処理',
+  'データ収集計画', '評価コスト', '後続効果', '長期ホライズン',
+  'マルチモーダル', '大規模データ', 'モデル予測制御'
+]);
+
+const TOO_GENERIC_EN = new Set([
+  'the', 'a', 'an', 'and', 'or', 'for', 'with', 'from', 'this', 'that', 'these', 'those',
+  'about', 'into', 'over', 'after', 'before', 'between', 'through', 'during', 'without',
+  'data', 'system', 'method', 'information', 'technology', 'result', 'feature', 'overview',
+  'summary', 'update', 'other', 'general', 'basic', 'simple', 'main', 'common', 'standard',
+  'example', 'case', 'type', 'kind', 'list', 'guide', 'introduction', 'tutorial',
+  'approach', 'solution', 'issue', 'problem', 'challenge', 'benefit', 'advantage',
+  'process', 'step', 'way', 'part', 'area', 'level', 'point', 'factor', 'aspect',
+  'new', 'latest', 'best', 'top', 'good', 'great', 'important', 'key', 'major',
+  'modern', 'advanced', 'popular', 'various', 'different', 'specific', 'related',
+  'current', 'recent', 'future', 'next', 'first', 'last', 'many', 'most', 'some',
+  'use', 'using', 'used', 'based', 'make', 'build', 'create', 'work', 'working',
+  'change', 'improve', 'development', 'management', 'analysis', 'review', 'comparison',
+  'blog', 'post', 'article', 'news', 'report', 'page', 'site', 'website', 'link',
+  'tips', 'tricks', 'how', 'why', 'what', 'which', 'when', 'where', 'who',
+  'beginner', 'beginners', 'getting', 'started', 'everything', 'complete', 'ultimate',
+  'prediction', 'optimization', 'speed', 'cost', 'reliability', 'security', 'robot',
+  'uncertainty', 'accuracy', 'performance', 'inference', 'learning', 'detection',
+  'recognition', 'generation', 'transformation', 'integration', 'automation',
+  'visualization', 'extraction', 'classification', 'computation', 'communication',
+  'control', 'model', 'framework', 'architecture', 'pipeline', 'module', 'platform',
+  'tool', 'training', 'evaluation', 'benchmark', 'dataset', 'experiment',
+  'machine learning', 'deep learning', 'computer vision', 'natural language processing',
+  'neural network', 'neural networks', 'reinforcement learning', 'artificial intelligence',
+  'robotics', 'cybersecurity', 'data science', 'cloud computing'
+]);
+
+const GENERIC_PHRASE_PATTERNS = [
+  /^.{2,}の(削減|向上|改善|最適化|自動化|効率化|高速化|安定化|強化|拡張|統合|実現|活用|確保|評価|分析|処理|管理|制御|検出|生成|変換|推定|予測|解析|構築|設計|実装|導入|運用)$/,
+  /^(高|低|大|小|長|短|多|新|旧)(精度|速度|性能|効率|品質|信頼性|可用性|安定性|柔軟性|拡張性|堅牢性)$/,
+  /^.{2,}(ベース|ベースの|に基づく|による|のための|についての|における|に関する)$/,
+  /^(リアルタイム|大規模|高性能|低コスト|高効率|次世代)(処理|制御|データ|システム|環境|モデル|計算|解析|推論|学習|最適化|変換|生成|検出|分析|評価|管理|統合|自動化|可視化|群制御|群の制御|スワーム制御|スワーム|言語モデル)$/,
+];
+
+/**
+ * Check if a label is too generic / junk to be a knowledge graph keyword.
+ * Returns true if the label should be REJECTED.
+ */
+function isGenericLabel(label) {
+  if (!label || label.length <= 1) return true;
+  if (JUNK_PATTERN.test(label)) return true;
+  if (TOO_GENERIC_JA.has(label)) return true;
+  if (TOO_GENERIC_EN.has(label.toLowerCase())) return true;
+  if (GENERIC_PHRASE_PATTERNS.some(p => p.test(label))) return true;
+  // Purely short hiragana/katakana (not proper nouns)
+  if (/^[\u3040-\u309f\u30a0-\u30ff]{1,6}$/.test(label) && !/[A-Za-z0-9\u4e00-\u9fff]/.test(label)) return true;
+  return false;
+}
+
 function loadGraph() {
   try {
     if (fs.existsSync(GRAPH_PATH)) return JSON.parse(fs.readFileSync(GRAPH_PATH, 'utf-8'));
@@ -52,10 +143,12 @@ async function updateGraph(client, entry) {
   const now = new Date().toISOString();
   const entrySources = Array.isArray(entry.sources) ? entry.sources : [];
 
-  // Update nodes
+  // Update nodes — filter out generic keywords before insertion
   for (const kw of keywords) {
     const key = normalizeKey(kw.keyword);
     if (!key) continue;
+    // Gate: reject generic/junk keywords at insertion time
+    if (isGenericLabel((kw.keyword || '').trim())) continue;
 
     if (graph.nodes[key]) {
       // Existing node — merge data
@@ -95,26 +188,41 @@ async function updateGraph(client, entry) {
     }
   }
 
-  // Update edges
-  for (const rel of relations) {
-    const fromKey = normalizeKey(rel.from);
-    const toKey = normalizeKey(rel.to);
-    if (!fromKey || !toKey || fromKey === toKey) continue;
-    if (!graph.nodes[fromKey] || !graph.nodes[toKey]) continue;
+  // Update edges from LLM-extracted relations
+  // Build edge lookup for fast duplicate check
+  const edgeSet = new Set(graph.edges.map(e => [e.from, e.to].sort().join('|')));
 
-    const existing = graph.edges.find(e =>
-      (e.from === fromKey && e.to === toKey) || (e.from === toKey && e.to === fromKey)
-    );
-    if (existing) {
-      existing.weight = (existing.weight || 1) + 1;
-      if (rel.relation) existing.relation = rel.relation;
+  function addOrStrengthEdge(fromKey, toKey, relation) {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    if (!graph.nodes[fromKey] || !graph.nodes[toKey]) return;
+    const pairKey = [fromKey, toKey].sort().join('|');
+    if (edgeSet.has(pairKey)) {
+      const existing = graph.edges.find(e =>
+        (e.from === fromKey && e.to === toKey) || (e.from === toKey && e.to === fromKey)
+      );
+      if (existing) {
+        existing.weight = (existing.weight || 1) + 1;
+        if (relation) existing.relation = relation;
+      }
     } else {
-      graph.edges.push({
-        from: fromKey,
-        to: toKey,
-        relation: rel.relation || '',
-        weight: 1
-      });
+      graph.edges.push({ from: fromKey, to: toKey, relation: relation || '', weight: 1 });
+      edgeSet.add(pairKey);
+    }
+  }
+
+  for (const rel of relations) {
+    addOrStrengthEdge(normalizeKey(rel.from), normalizeKey(rel.to), rel.relation);
+  }
+
+  // Auto-connect: all keywords extracted from the same research are related
+  // (they co-occurred in the same document/topic)
+  const acceptedKeys = keywords
+    .map(kw => normalizeKey(kw.keyword))
+    .filter(k => k && graph.nodes[k]);
+
+  for (let i = 0; i < acceptedKeys.length; i++) {
+    for (let j = i + 1; j < acceptedKeys.length; j++) {
+      addOrStrengthEdge(acceptedKeys[i], acceptedKeys[j], `同一リサーチ: ${topic.slice(0, 40)}`);
     }
   }
 
@@ -744,54 +852,6 @@ async function pruneGraph(client, onLog, options = {}) {
     if (edgeCountsPre[e.to] !== undefined) edgeCountsPre[e.to]++;
   }
 
-  const junkPattern = /^[\d\s\-_.,:;!?@#$%^&*()=+\[\]{}|\\/<>~`'"…→←↑↓●■▲▼◆★※]+$/;
-
-  // Generic words: always remove regardless of count/connections
-  // These are common everyday words that have no value as knowledge graph keywords
-  const tooGenericJa = new Set([
-    // 抽象的な概念
-    '情報', '技術', 'システム', 'データ', '処理', '方法', '開発', '研究', '最新', '動向',
-    '概要', 'まとめ', 'その他', '関連', '結果', '内容', '分析', '評価', '特徴', '機能',
-    '環境', '構造', '設計', '実装', '確認', '対応', '管理', '利用', '活用', '提供',
-    '実現', '向上', '改善', '問題', '課題', '目的', '背景', '理由', '意味', '定義',
-    '説明', '解説', '紹介', '比較', '検討', '考察', '観点', '視点', '側面', '要素',
-    // 一般動詞・形容詞由来
-    '対策', '注意', '重要', '必要', '可能', '有効', '基本', '応用', '実践', '具体的',
-    '効果', '影響', '変化', '進化', '成長', '発展', '将来', '今後', '現在', '最近',
-    '世界', '日本', '海外', '国内', '企業', '事例', '例', '種類', '一覧', 'リスト',
-    // ウェブ・記事由来
-    'サイト', 'ページ', '記事', 'ブログ', 'ニュース', 'レポート', 'ガイド', '入門',
-    '初心者', '上級者', 'おすすめ', 'ランキング', '人気', '話題', 'トレンド', '注目',
-    '選び方', '使い方', 'やり方', '始め方', '作り方', 'メリット', 'デメリット',
-    'ポイント', 'コツ', 'まとめ記事', '徹底解説', '完全ガイド',
-    // 数量・程度
-    '多く', '少ない', '高い', '低い', '大きい', '小さい', '良い', '悪い',
-    '全体', '部分', '一部', '主要', '代表的', '典型的', '一般的', '特殊'
-  ]);
-
-  const tooGenericEn = new Set([
-    // Articles, prepositions, conjunctions
-    'the', 'a', 'an', 'and', 'or', 'for', 'with', 'from', 'this', 'that', 'these', 'those',
-    'about', 'into', 'over', 'after', 'before', 'between', 'through', 'during', 'without',
-    // Generic nouns
-    'data', 'system', 'method', 'information', 'technology', 'result', 'feature', 'overview',
-    'summary', 'update', 'other', 'general', 'basic', 'simple', 'main', 'common', 'standard',
-    'example', 'case', 'type', 'kind', 'list', 'guide', 'introduction', 'tutorial',
-    'approach', 'solution', 'issue', 'problem', 'challenge', 'benefit', 'advantage',
-    'process', 'step', 'way', 'part', 'area', 'level', 'point', 'factor', 'aspect',
-    // Generic adjectives/adverbs
-    'new', 'latest', 'best', 'top', 'good', 'great', 'important', 'key', 'major',
-    'modern', 'advanced', 'popular', 'various', 'different', 'specific', 'related',
-    'current', 'recent', 'future', 'next', 'first', 'last', 'many', 'most', 'some',
-    // Generic verbs (as nouns)
-    'use', 'using', 'used', 'based', 'make', 'build', 'create', 'work', 'working',
-    'change', 'improve', 'development', 'management', 'analysis', 'review', 'comparison',
-    // Web/article junk
-    'blog', 'post', 'article', 'news', 'report', 'page', 'site', 'website', 'link',
-    'tips', 'tricks', 'how', 'why', 'what', 'which', 'when', 'where', 'who',
-    'beginner', 'beginners', 'getting', 'started', 'everything', 'complete', 'ultimate'
-  ]);
-
   const autoRemoveKeys = new Set();
   for (const k of currentKeys) {
     const node = graph.nodes[k];
@@ -800,13 +860,8 @@ async function pruneGraph(client, onLog, options = {}) {
     const conn = edgeCountsPre[k] || 0;
     const count = node.count || 1;
 
-    // Remove: empty/junk labels, too short, pure numbers/punctuation
-    if (!label || label.length <= 1 || junkPattern.test(label)) {
-      autoRemoveKeys.add(k);
-      continue;
-    }
-    // Remove: generic words unconditionally — these are never useful as keywords
-    if (tooGenericJa.has(label) || tooGenericEn.has(label.toLowerCase())) {
+    // Remove: generic/junk via shared filter
+    if (isGenericLabel(label)) {
       autoRemoveKeys.add(k);
       continue;
     }
@@ -895,12 +950,12 @@ async function pruneGraph(client, onLog, options = {}) {
       if (cluster.size >= 2) clusters.push([...cluster]);
     }
 
-    // Also add remaining ungrouped keys as one batch (for deletion check)
+    // Also add remaining ungrouped keys — ALL keywords must be LLM-reviewed
     const ungrouped = currentKeys.filter(k => !visited.has(k));
     if (ungrouped.length > 0) {
       for (let i = 0; i < ungrouped.length; i += BATCH_SIZE) {
         const batch = ungrouped.slice(i, i + BATCH_SIZE);
-        if (batch.length >= 2) clusters.push(batch);
+        if (batch.length >= 1) clusters.push(batch);
       }
     }
 
@@ -1036,4 +1091,102 @@ function normalizeKey(str) {
   return str.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_\u3000-\u9fff\uff00-\uffef]/g, '').slice(0, 60);
 }
 
-module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode };
+/**
+ * Normalize a category string for comparison.
+ * Handles slash-separated multi-categories by taking the first, and lowercases.
+ */
+function normCategory(cat) {
+  if (!cat) return '';
+  return cat.split('/')[0].trim().toLowerCase();
+}
+
+/**
+ * Auto-connect nodes based on shared topics and same category.
+ * Called after reviewGraph to ensure the graph is well-connected.
+ *
+ * Strategies:
+ * 1. Shared topics: if two nodes were researched under the same topic, connect them
+ * 2. Same category + low connectivity: connect under-linked nodes within the same category
+ */
+function autoConnect(onLog) {
+  const graph = loadGraph();
+  const keys = Object.keys(graph.nodes);
+  if (keys.length < 2) return graph;
+
+  // Build existing edge set for fast lookup
+  const edgeSet = new Set(graph.edges.map(e => [e.from, e.to].sort().join('|')));
+  let added = 0;
+
+  function addEdge(fromKey, toKey, relation) {
+    const pairKey = [fromKey, toKey].sort().join('|');
+    if (edgeSet.has(pairKey)) return false;
+    graph.edges.push({ from: fromKey, to: toKey, relation, weight: 1 });
+    edgeSet.add(pairKey);
+    added++;
+    return true;
+  }
+
+  // --- Strategy 1: Shared topics ---
+  // Build topic → keys index
+  const topicToKeys = new Map();
+  for (const k of keys) {
+    const topics = graph.nodes[k].topics || [];
+    for (const t of topics) {
+      if (!topicToKeys.has(t)) topicToKeys.set(t, []);
+      topicToKeys.get(t).push(k);
+    }
+  }
+
+  for (const [topic, topicKeys] of topicToKeys) {
+    if (topicKeys.length < 2 || topicKeys.length > 30) continue; // skip very large groups
+    for (let i = 0; i < topicKeys.length; i++) {
+      for (let j = i + 1; j < topicKeys.length; j++) {
+        addEdge(topicKeys[i], topicKeys[j], `共通トピック: ${topic.slice(0, 40)}`);
+      }
+    }
+  }
+
+  const addedByTopic = added;
+
+  // --- Strategy 2: Same category linkage for under-connected nodes ---
+  // Count edges per node
+  const edgeCounts = {};
+  for (const k of keys) edgeCounts[k] = 0;
+  for (const e of graph.edges) {
+    if (edgeCounts[e.from] !== undefined) edgeCounts[e.from]++;
+    if (edgeCounts[e.to] !== undefined) edgeCounts[e.to]++;
+  }
+
+  // Group by normalized category
+  const catToKeys = new Map();
+  for (const k of keys) {
+    const cat = normCategory(graph.nodes[k].category);
+    if (!cat) continue;
+    if (!catToKeys.has(cat)) catToKeys.set(cat, []);
+    catToKeys.get(cat).push(k);
+  }
+
+  for (const [cat, catKeys] of catToKeys) {
+    if (catKeys.length < 2 || catKeys.length > 50) continue;
+    // Only connect under-connected nodes (0-2 edges) to well-connected ones in same category
+    const underConnected = catKeys.filter(k => edgeCounts[k] <= 2);
+    const wellConnected = catKeys.filter(k => edgeCounts[k] >= 1)
+      .sort((a, b) => (edgeCounts[b] || 0) - (edgeCounts[a] || 0));
+
+    for (const uc of underConnected) {
+      // Connect to up to 3 well-connected nodes in the same category
+      let linked = 0;
+      for (const wc of wellConnected) {
+        if (uc === wc) continue;
+        if (linked >= 3) break;
+        if (addEdge(uc, wc, `同カテゴリ: ${cat}`)) linked++;
+      }
+    }
+  }
+
+  saveGraph(graph);
+  if (onLog) onLog('info', `Auto-connect: +${addedByTopic} edges from shared topics, +${added - addedByTopic} from same category (total edges: ${graph.edges.length})`);
+  return graph;
+}
+
+module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode, autoConnect };

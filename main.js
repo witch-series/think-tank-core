@@ -22,7 +22,7 @@ const { parseJsonSafe } = require('./lib/json-parser');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
-const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode } = require('./core/knowledge-graph');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode, autoConnect } = require('./core/knowledge-graph');
 const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
 const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
@@ -594,6 +594,7 @@ function scheduleAutonomousTasks() {
           await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
           setPhase('organizing', 'Reviewing knowledge graph');
           await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+          autoConnect(log);
 
           actionSuccess = true;
           actionReason = `compressed ${total.length} files`;
@@ -966,6 +967,7 @@ function startServer(port) {
             await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
             setPhase('organizing', 'Reviewing knowledge graph');
             await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+            autoConnect(log);
             log('info', 'Graph reorganization completed');
           } catch (e) {
             log('error', `Graph reorganization failed: ${e.message}`);
@@ -1115,6 +1117,7 @@ function start() {
       log('info', 'Startup graph prune & review...');
       await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
       await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+      autoConnect(log);
     }
   }));
 

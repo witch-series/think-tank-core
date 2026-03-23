@@ -207,7 +207,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
-    let apiUrl = 'http://localhost:2500';
+    let apiUrl = window.location.protocol + '//' + window.location.hostname + ':2500';
 
     // Configure marked for safe rendering
     if (typeof marked !== 'undefined') {
