@@ -136,6 +136,7 @@ async function updateGraph(client, entry) {
  */
 async function reviewGraph(client, onLog, options = {}) {
   const queryOpts = options.model ? { model: options.model } : {};
+  const goalPrompt = options.goalPrompt || '';
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 2) {
@@ -256,7 +257,7 @@ async function reviewGraph(client, onLog, options = {}) {
           return `- ${fromLabel} → ${toLabel}: ${e.relation || '関連'} (重み: ${e.weight || 1})`;
         }).join('\n') || 'なし';
 
-      const prompt = fillPrompt('review-graph.user', { nodeList, edgeList });
+      const prompt = fillPrompt('review-graph.user', { nodeList, edgeList, goalPrompt: goalPrompt || 'なし' });
       const { parsed: result } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
       if (result) {
         const counts = applyReviewResult(result);
@@ -595,6 +596,7 @@ function getGraphData() {
  */
 async function pruneGraph(client, onLog, options = {}) {
   const queryOpts = options.model ? { model: options.model } : {};
+  const goalPrompt = options.goalPrompt || '';
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 2) {
@@ -921,7 +923,7 @@ async function pruneGraph(client, onLog, options = {}) {
 
       if (!sortedKeywords) continue;
 
-      const prompt = fillPrompt('prune-graph.user', { sortedKeywords });
+      const prompt = fillPrompt('prune-graph.user', { sortedKeywords, goalPrompt: goalPrompt || 'なし' });
       try {
         const { parsed } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
         if (parsed) {

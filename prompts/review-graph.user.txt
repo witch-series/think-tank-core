@@ -1,4 +1,6 @@
-以下のキーワードと接続を見直してください。
+最終目標: {{goalPrompt}}
+
+以下のキーワードと接続を見直してください。最終目標に関連する専門用語だけが残るようにしてください。
 
 キーワード:
 {{nodeList}}
@@ -8,6 +10,7 @@
 
 指示:
 - 重複キーワード → merge
+- 最終目標と無関係なキーワード → merge で関連キーワードに統合するか、不要なら無視
 - カテゴリ未設定 → categories で設定（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）
 - 関連あるのに未接続 → addEdges
 - 関連薄い接続 → removeEdges

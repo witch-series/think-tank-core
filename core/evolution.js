@@ -247,7 +247,7 @@ async function dreamPhase(client, config, repoPath) {
   });
 
   const response = await client.query(prompt, null,
-    { model: client.dreamModel });
+    { model: client.model });
 
   const analysis = parseJsonSafe(response.response || '') || { raw: response.response, nextTasks: [] };
 

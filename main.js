@@ -355,11 +355,11 @@ function scheduleAutonomousTasks() {
           moduleCount,
           graphNodeCount: graphStats.nodeCount,
           existingFiles: context.functionList
-        }, { model: ollamaClient.dreamModel });
+        }, { goalPrompt: config.searchPrompt });
 
         // Periodically re-evaluate goal progress
         if (cycleCount % 5 === 0) {
-          await evaluateProgress(ollamaClient, { model: ollamaClient.dreamModel });
+          await evaluateProgress(ollamaClient, { goalPrompt: config.searchPrompt });
         }
 
         goalSummary = getGoalSummary();
@@ -536,7 +536,7 @@ function scheduleAutonomousTasks() {
           const result = await runAgentLoop(ollamaClient, devTask, ROOT, {
             workLogDir, onLog: log, mode: 'develop',
             goalContext: goalCtx,
-            model: ollamaClient.dreamModel
+            model: ollamaClient.model
           });
 
           const devHasData = (result.insights && result.insights.length > 0) ||
@@ -569,7 +569,7 @@ function scheduleAutonomousTasks() {
           // Use develop mode for execution tasks (has exec_command tool)
           const result = await runAgentLoop(ollamaClient, execTask, ROOT, {
             workLogDir, onLog: log, mode: 'develop',
-            model: ollamaClient.dreamModel
+            model: ollamaClient.model
           });
 
           actionSuccess = !result.empty;
@@ -591,9 +591,9 @@ function scheduleAutonomousTasks() {
           }
 
           setPhase('organizing', 'Pruning knowledge graph');
-          await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+          await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
           setPhase('organizing', 'Reviewing knowledge graph');
-          await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+          await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
 
           actionSuccess = true;
           actionReason = `compressed ${total.length} files`;
@@ -963,9 +963,9 @@ function startServer(port) {
           try {
             setPhase('organizing', 'Pruning knowledge graph');
             log('info', 'Graph reorganization started');
-            await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+            await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
             setPhase('organizing', 'Reviewing knowledge graph');
-            await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+            await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
             log('info', 'Graph reorganization completed');
           } catch (e) {
             log('error', `Graph reorganization failed: ${e.message}`);
@@ -1113,8 +1113,8 @@ function start() {
     const count = await processUnindexedEntries(ollamaClient, [researchDir, analysisDir], log);
     if (count > 0) {
       log('info', 'Startup graph prune & review...');
-      await pruneGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
-      await reviewGraph(ollamaClient, log, { model: ollamaClient.dreamModel });
+      await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+      await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
     }
   }));
 
