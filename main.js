@@ -124,35 +124,29 @@ taskManager.on('task:complete', ({ task }) => log('debug', `Task completed: ${ta
 taskManager.on('task:error', ({ task, error }) => log('error', `Task failed: ${task?.name || 'unknown'} — ${error?.message}`));
 
 taskManager.on('idle', () => {
-  if (idleTimer || restarting) return;
-  const interval = config.taskInterval || 60000;
-  log('debug', `Queue idle — next autonomous cycle in ${Math.round(interval / 1000)}s`);
-  idleTimer = setTimeout(() => {
-    idleTimer = null;
+  if (restarting) return;
+  // Immediately schedule the next autonomous cycle without waiting
+  setImmediate(() => {
     if (!restarting) {
       try {
         scheduleAutonomousTasks();
       } catch (e) {
         log('error', `Failed to schedule autonomous cycle: ${e.message}`);
-        // Ensure the loop continues even if scheduling itself fails
-        idleTimer = setTimeout(() => {
-          idleTimer = null;
+        // Retry after a short delay on failure
+        setTimeout(() => {
           if (!restarting) scheduleAutonomousTasks();
-        }, interval);
+        }, 5000);
       }
     }
-  }, interval);
+  });
 });
 
 taskManager.on('task:error', ({ task, error }) => {
-  // Ensure cycle continues after task failure by scheduling next cycle if queue is empty
-  if (taskManager.queue.length === 0 && !idleTimer && !restarting) {
-    const interval = config.taskInterval || 60000;
-    log('debug', `Recovering from task error — next cycle in ${Math.round(interval / 1000)}s`);
-    idleTimer = setTimeout(() => {
-      idleTimer = null;
+  // Ensure cycle continues after task failure
+  if (taskManager.queue.length === 0 && !restarting) {
+    setImmediate(() => {
       if (!restarting) scheduleAutonomousTasks();
-    }, interval);
+    });
   }
 });
 

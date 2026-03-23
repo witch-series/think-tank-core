@@ -154,6 +154,7 @@ async function reviewGraph(client, onLog, options = {}) {
     let mergeCount = 0, addCount = 0, removeCount = 0;
 
     const merges = Array.isArray(result.merge) ? result.merge : [];
+    const mergedFromKeys = new Set();
     for (const m of merges) {
       const fromKey = normalizeKey(m.from);
       const intoKey = normalizeKey(m.into);
@@ -176,10 +177,14 @@ async function reviewGraph(client, onLog, options = {}) {
         if (edge.from === fromKey) edge.from = intoKey;
         if (edge.to === fromKey) edge.to = intoKey;
       }
-      graph.edges = graph.edges.filter(e => e.from !== e.to);
+      mergedFromKeys.add(fromKey);
       delete graph.nodes[fromKey];
       if (onLog) onLog('debug', `Graph merge: ${m.from} → ${m.into}`);
       mergeCount++;
+    }
+    // Batch self-loop removal after all merges
+    if (mergedFromKeys.size > 0) {
+      graph.edges = graph.edges.filter(e => e.from !== e.to);
     }
 
     const categories = result.categories || {};
@@ -189,28 +194,37 @@ async function reviewGraph(client, onLog, options = {}) {
     }
 
     const addEdges = Array.isArray(result.addEdges) ? result.addEdges : [];
+    // Build edge lookup set for fast duplicate check
+    const existingEdgeSet = new Set(
+      graph.edges.map(e => [e.from, e.to].sort().join('|'))
+    );
     for (const e of addEdges) {
       const fromKey = normalizeKey(e.from);
       const toKey = normalizeKey(e.to);
       if (!fromKey || !toKey || fromKey === toKey) continue;
       if (!graph.nodes[fromKey] || !graph.nodes[toKey]) continue;
-      const exists = graph.edges.find(ex =>
-        (ex.from === fromKey && ex.to === toKey) || (ex.from === toKey && ex.to === fromKey)
-      );
-      if (!exists) {
+      const pairKey = [fromKey, toKey].sort().join('|');
+      if (!existingEdgeSet.has(pairKey)) {
         graph.edges.push({ from: fromKey, to: toKey, relation: e.relation || '', weight: 1 });
+        existingEdgeSet.add(pairKey);
         addCount++;
       }
     }
 
     const removeEdges = Array.isArray(result.removeEdges) ? result.removeEdges : [];
-    for (const e of removeEdges) {
-      const fromKey = normalizeKey(e.from);
-      const toKey = normalizeKey(e.to);
-      graph.edges = graph.edges.filter(ex =>
-        !((ex.from === fromKey && ex.to === toKey) || (ex.from === toKey && ex.to === fromKey))
-      );
-      removeCount++;
+    if (removeEdges.length > 0) {
+      // Batch edge removal — collect all pairs to remove, then single filter pass
+      const removePairs = new Set();
+      for (const e of removeEdges) {
+        const fromKey = normalizeKey(e.from);
+        const toKey = normalizeKey(e.to);
+        removePairs.add([fromKey, toKey].sort().join('|'));
+        removeCount++;
+      }
+      graph.edges = graph.edges.filter(ex => {
+        const pairKey = [ex.from, ex.to].sort().join('|');
+        return !removePairs.has(pairKey);
+      });
     }
 
     return { mergeCount, addCount, removeCount };
@@ -591,7 +605,10 @@ async function pruneGraph(client, onLog, options = {}) {
   // Pre-pass: programmatic fuzzy merge for obvious duplicates
   const prePassMerged = [];
 
-  // Helper: merge victim into keeper
+  // Track merged victims for deferred edge cleanup
+  const mergedVictims = new Set();
+
+  // Helper: merge victim into keeper (defers self-loop cleanup)
   function mergeNodes(keeper, victim) {
     if (!graph.nodes[victim] || !graph.nodes[keeper]) return false;
     const src = graph.nodes[victim];
@@ -609,7 +626,7 @@ async function pruneGraph(client, onLog, options = {}) {
       if (edge.from === victim) edge.from = keeper;
       if (edge.to === victim) edge.to = keeper;
     }
-    graph.edges = graph.edges.filter(e => e.from !== e.to);
+    mergedVictims.add(victim);
     prePassMerged.push(src.label || victim);
     delete graph.nodes[victim];
     return true;
@@ -667,6 +684,11 @@ async function pruneGraph(client, onLog, options = {}) {
     }
   }
 
+  // Batch self-loop removal after all pre-pass merges
+  if (mergedVictims.size > 0) {
+    graph.edges = graph.edges.filter(e => e.from !== e.to);
+  }
+
   if (prePassMerged.length > 0 && onLog) {
     onLog('info', `Pre-pass: auto-merged ${prePassMerged.length} obvious duplicates`);
   }
@@ -682,7 +704,7 @@ async function pruneGraph(client, onLog, options = {}) {
   let totalRemoved = 0;
   const removedLabels = [...prePassMerged];
 
-  // Helper: apply LLM prune result to graph
+  // Helper: apply LLM prune result to graph (batched edge removal)
   function applyPruneResult(result) {
     const merges = Array.isArray(result.merge) ? result.merge : [];
     for (const m of merges) {
@@ -695,16 +717,69 @@ async function pruneGraph(client, onLog, options = {}) {
       if (onLog) onLog('debug', `Prune merge: ${m.from} → ${m.into}${m.reason ? ' (' + m.reason + ')' : ''}`);
     }
     const removes = Array.isArray(result.remove) ? result.remove : [];
+    const removedKeys = new Set();
     for (const label of removes) {
       const key = normalizeKey(label);
       if (key && graph.nodes[key]) {
         removedLabels.push(graph.nodes[key].label || label);
         delete graph.nodes[key];
-        graph.edges = graph.edges.filter(e => e.from !== key && e.to !== key);
+        removedKeys.add(key);
         totalRemoved++;
         if (onLog) onLog('debug', `Prune remove: ${label}`);
       }
     }
+    // Batch edge removal — single pass instead of per-node filter
+    if (removedKeys.size > 0) {
+      graph.edges = graph.edges.filter(e => !removedKeys.has(e.from) && !removedKeys.has(e.to));
+    }
+  }
+
+  // --- Pre-LLM pruning: remove obviously junk nodes without LLM ---
+  const edgeCountsPre = {};
+  for (const k of currentKeys) edgeCountsPre[k] = 0;
+  for (const e of graph.edges) {
+    if (edgeCountsPre[e.from] !== undefined) edgeCountsPre[e.from]++;
+    if (edgeCountsPre[e.to] !== undefined) edgeCountsPre[e.to]++;
+  }
+
+  const junkPattern = /^[\d\s\-_.,:;!?@#$%^&*()=+\[\]{}|\\/<>~`'"]+$/;
+  const tooGenericJa = /^(情報|技術|システム|データ|処理|方法|開発|研究|最新|動向|概要|まとめ|その他|関連|結果|内容|分析|評価|特徴|機能|環境|構造|設計|実装|確認|対応|管理|利用|活用|提供|実現|向上|改善|問題|課題)$/;
+  const tooGenericEn = /^(the|and|for|with|from|this|that|about|data|system|method|information|technology|result|feature|overview|summary|update|new|latest|other|general|basic|simple|main|common|standard)$/i;
+
+  const autoRemoveKeys = new Set();
+  for (const k of currentKeys) {
+    const node = graph.nodes[k];
+    if (!node) continue;
+    const label = (node.label || k).trim();
+    const conn = edgeCountsPre[k] || 0;
+    const count = node.count || 1;
+
+    // Remove: empty/junk labels, too short, pure numbers/punctuation
+    if (!label || label.length <= 1 || junkPattern.test(label)) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
+    // Remove: too generic single words (count=1, no connections)
+    if (count <= 1 && conn === 0 && (tooGenericJa.test(label) || tooGenericEn.test(label))) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
+    // Remove: isolated nodes with very short labels (likely fragments)
+    if (count <= 1 && conn === 0 && label.length <= 3 && !/[A-Z]{2,}/.test(label)) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
+  }
+
+  if (autoRemoveKeys.size > 0) {
+    for (const k of autoRemoveKeys) {
+      removedLabels.push(graph.nodes[k]?.label || k);
+      delete graph.nodes[k];
+      totalRemoved++;
+    }
+    graph.edges = graph.edges.filter(e => !autoRemoveKeys.has(e.from) && !autoRemoveKeys.has(e.to));
+    currentKeys = Object.keys(graph.nodes);
+    if (onLog) onLog('info', `Pre-LLM prune: auto-removed ${autoRemoveKeys.size} junk/generic nodes`);
   }
 
   // --- Multi-round LLM pruning ---
