@@ -742,9 +742,53 @@ async function pruneGraph(client, onLog, options = {}) {
     if (edgeCountsPre[e.to] !== undefined) edgeCountsPre[e.to]++;
   }
 
-  const junkPattern = /^[\d\s\-_.,:;!?@#$%^&*()=+\[\]{}|\\/<>~`'"]+$/;
-  const tooGenericJa = /^(情報|技術|システム|データ|処理|方法|開発|研究|最新|動向|概要|まとめ|その他|関連|結果|内容|分析|評価|特徴|機能|環境|構造|設計|実装|確認|対応|管理|利用|活用|提供|実現|向上|改善|問題|課題)$/;
-  const tooGenericEn = /^(the|and|for|with|from|this|that|about|data|system|method|information|technology|result|feature|overview|summary|update|new|latest|other|general|basic|simple|main|common|standard)$/i;
+  const junkPattern = /^[\d\s\-_.,:;!?@#$%^&*()=+\[\]{}|\\/<>~`'"…→←↑↓●■▲▼◆★※]+$/;
+
+  // Generic words: always remove regardless of count/connections
+  // These are common everyday words that have no value as knowledge graph keywords
+  const tooGenericJa = new Set([
+    // 抽象的な概念
+    '情報', '技術', 'システム', 'データ', '処理', '方法', '開発', '研究', '最新', '動向',
+    '概要', 'まとめ', 'その他', '関連', '結果', '内容', '分析', '評価', '特徴', '機能',
+    '環境', '構造', '設計', '実装', '確認', '対応', '管理', '利用', '活用', '提供',
+    '実現', '向上', '改善', '問題', '課題', '目的', '背景', '理由', '意味', '定義',
+    '説明', '解説', '紹介', '比較', '検討', '考察', '観点', '視点', '側面', '要素',
+    // 一般動詞・形容詞由来
+    '対策', '注意', '重要', '必要', '可能', '有効', '基本', '応用', '実践', '具体的',
+    '効果', '影響', '変化', '進化', '成長', '発展', '将来', '今後', '現在', '最近',
+    '世界', '日本', '海外', '国内', '企業', '事例', '例', '種類', '一覧', 'リスト',
+    // ウェブ・記事由来
+    'サイト', 'ページ', '記事', 'ブログ', 'ニュース', 'レポート', 'ガイド', '入門',
+    '初心者', '上級者', 'おすすめ', 'ランキング', '人気', '話題', 'トレンド', '注目',
+    '選び方', '使い方', 'やり方', '始め方', '作り方', 'メリット', 'デメリット',
+    'ポイント', 'コツ', 'まとめ記事', '徹底解説', '完全ガイド',
+    // 数量・程度
+    '多く', '少ない', '高い', '低い', '大きい', '小さい', '良い', '悪い',
+    '全体', '部分', '一部', '主要', '代表的', '典型的', '一般的', '特殊'
+  ]);
+
+  const tooGenericEn = new Set([
+    // Articles, prepositions, conjunctions
+    'the', 'a', 'an', 'and', 'or', 'for', 'with', 'from', 'this', 'that', 'these', 'those',
+    'about', 'into', 'over', 'after', 'before', 'between', 'through', 'during', 'without',
+    // Generic nouns
+    'data', 'system', 'method', 'information', 'technology', 'result', 'feature', 'overview',
+    'summary', 'update', 'other', 'general', 'basic', 'simple', 'main', 'common', 'standard',
+    'example', 'case', 'type', 'kind', 'list', 'guide', 'introduction', 'tutorial',
+    'approach', 'solution', 'issue', 'problem', 'challenge', 'benefit', 'advantage',
+    'process', 'step', 'way', 'part', 'area', 'level', 'point', 'factor', 'aspect',
+    // Generic adjectives/adverbs
+    'new', 'latest', 'best', 'top', 'good', 'great', 'important', 'key', 'major',
+    'modern', 'advanced', 'popular', 'various', 'different', 'specific', 'related',
+    'current', 'recent', 'future', 'next', 'first', 'last', 'many', 'most', 'some',
+    // Generic verbs (as nouns)
+    'use', 'using', 'used', 'based', 'make', 'build', 'create', 'work', 'working',
+    'change', 'improve', 'development', 'management', 'analysis', 'review', 'comparison',
+    // Web/article junk
+    'blog', 'post', 'article', 'news', 'report', 'page', 'site', 'website', 'link',
+    'tips', 'tricks', 'how', 'why', 'what', 'which', 'when', 'where', 'who',
+    'beginner', 'beginners', 'getting', 'started', 'everything', 'complete', 'ultimate'
+  ]);
 
   const autoRemoveKeys = new Set();
   for (const k of currentKeys) {
@@ -759,8 +803,8 @@ async function pruneGraph(client, onLog, options = {}) {
       autoRemoveKeys.add(k);
       continue;
     }
-    // Remove: too generic single words (count=1, no connections)
-    if (count <= 1 && conn === 0 && (tooGenericJa.test(label) || tooGenericEn.test(label))) {
+    // Remove: generic words unconditionally — these are never useful as keywords
+    if (tooGenericJa.has(label) || tooGenericEn.has(label.toLowerCase())) {
       autoRemoveKeys.add(k);
       continue;
     }

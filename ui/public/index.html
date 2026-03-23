@@ -564,6 +564,8 @@
     var graphMouseX = 0, graphMouseY = 0;
     var graphScale = 1, graphOffsetX = 0, graphOffsetY = 0;
     var graphPanStart = null;
+    var graphFilterCategory = null; // null = show all, string = filter to this category
+    var legendHitAreas = []; // [{x, y, w, h, category}] for click detection
 
     async function fetchGraph() {
       try {
@@ -731,10 +733,14 @@
         for (var e = 0; e < graphEdges.length; e++) {
           var edge = graphEdges[e];
           var a = graphNodes[edge.from], b = graphNodes[edge.to];
+          var aCat = (a.node.category || '').toLowerCase();
+          var bCat = (b.node.category || '').toLowerCase();
+          var edgeFiltered = graphFilterCategory && aCat !== graphFilterCategory && bCat !== graphFilterCategory;
+          var edgeAlpha = edgeFiltered ? 0.03 : Math.min(0.2 + edge.weight * 0.1, 0.8);
           graphCtx.beginPath();
           graphCtx.moveTo(a.x, a.y);
           graphCtx.lineTo(b.x, b.y);
-          graphCtx.strokeStyle = 'rgba(98, 114, 164, ' + Math.min(0.2 + edge.weight * 0.1, 0.8) + ')';
+          graphCtx.strokeStyle = 'rgba(98, 114, 164, ' + edgeAlpha + ')';
           graphCtx.lineWidth = Math.min(1 + edge.weight * 0.5, 4);
           graphCtx.stroke();
         }
@@ -777,9 +783,10 @@
 
           var cat = (n.node.category || '').toLowerCase();
           var cc = categoryColorMap[cat] || defaultCatColor;
-          var dimmed = graphSearchMatches.length > 0 && !isMatch && !isHovered;
-          var saturation = dimmed ? '20%' : (isHovered ? '100%' : cc.s + '%');
-          var lightness = dimmed ? '25%' : (isHovered ? '65%' : (40 + Math.min((n.node.count || 1) * 3, 20)) + '%');
+          var filteredOut = graphFilterCategory && cat !== graphFilterCategory && !(categoryColorMap[cat] === undefined && graphFilterCategory === 'other');
+          var dimmed = filteredOut || (graphSearchMatches.length > 0 && !isMatch && !isHovered);
+          var saturation = dimmed ? '10%' : (isHovered ? '100%' : cc.s + '%');
+          var lightness = dimmed ? '20%' : (isHovered ? '65%' : (40 + Math.min((n.node.count || 1) * 3, 20)) + '%');
           graphCtx.beginPath();
           graphCtx.arc(n.x, n.y, n.r + (isHovered ? 3 : 0), 0, Math.PI * 2);
           graphCtx.fillStyle = 'hsl(' + cc.h + ',' + saturation + ',' + lightness + ')';
@@ -795,8 +802,9 @@
           }
 
           // Label — scale-compensated so text stays readable
+          if (filteredOut && !isHovered) continue; // Skip label for filtered-out nodes
           var fontSize = Math.max(12, 14 / graphScale);
-          graphCtx.fillStyle = dimmed ? 'rgba(248,248,242,0.2)' : (isHovered ? '#f8f8f2' : 'rgba(248,248,242,0.9)');
+          graphCtx.fillStyle = dimmed ? 'rgba(248,248,242,0.15)' : (isHovered ? '#f8f8f2' : 'rgba(248,248,242,0.9)');
           graphCtx.font = (isHovered ? 'bold ' : '') + fontSize + 'px Consolas, Monaco, monospace';
           graphCtx.textAlign = 'center';
           graphCtx.fillText(n.label, n.x, n.y - n.r - 6);
@@ -804,34 +812,49 @@
 
         graphCtx.restore();
 
-        // Draw legend (screen space) — group unknown categories into "Other"
+        // Draw legend (screen space) — clickable category filter
         var legendEntries = [];
         var hasOther = false;
         var legendCats = Object.keys(activeCats);
         for (var li = 0; li < legendCats.length; li++) {
           var lcat = legendCats[li];
           if (categoryColorMap[lcat]) {
-            legendEntries.push({ color: categoryColorMap[lcat], label: categoryColorMap[lcat].label });
+            legendEntries.push({ color: categoryColorMap[lcat], label: categoryColorMap[lcat].label, category: lcat });
           } else {
             hasOther = true;
           }
         }
         if (hasOther) {
-          legendEntries.push({ color: defaultCatColor, label: 'Other' });
+          legendEntries.push({ color: defaultCatColor, label: 'Other', category: 'other' });
         }
+        legendHitAreas = [];
         if (legendEntries.length > 0) {
           var lx = 10, ly = 14;
           graphCtx.font = '11px Consolas, Monaco, monospace';
           graphCtx.textAlign = 'left';
           for (var li = 0; li < legendEntries.length; li++) {
             var le = legendEntries[li];
+            var isActive = !graphFilterCategory || graphFilterCategory === le.category;
+            var dotAlpha = isActive ? 1.0 : 0.25;
+            var textColor = isActive ? '#ccc' : '#555';
+            graphCtx.globalAlpha = dotAlpha;
             graphCtx.fillStyle = 'hsl(' + le.color.h + ',' + le.color.s + '%,50%)';
             graphCtx.beginPath();
             graphCtx.arc(lx + 5, ly, 5, 0, Math.PI * 2);
             graphCtx.fill();
-            graphCtx.fillStyle = '#aaa';
+            graphCtx.globalAlpha = 1.0;
+            graphCtx.fillStyle = textColor;
+            var textW = graphCtx.measureText(le.label).width;
             graphCtx.fillText(le.label, lx + 14, ly + 4);
+            legendHitAreas.push({ x: lx, y: ly - 8, w: 14 + textW + 4, h: 16, category: le.category });
             ly += 18;
+          }
+          // "All" label when filtered
+          if (graphFilterCategory) {
+            graphCtx.fillStyle = '#bd93f9';
+            graphCtx.fillText('× Clear filter', lx, ly + 4);
+            var clearW = graphCtx.measureText('× Clear filter').width;
+            legendHitAreas.push({ x: lx, y: ly - 8, w: clearW + 4, h: 16, category: null });
           }
         }
 
@@ -867,9 +890,18 @@
         return -1;
       }
 
+      function isOnLegend(mx, my) {
+        for (var li = 0; li < legendHitAreas.length; li++) {
+          var area = legendHitAreas[li];
+          if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) return true;
+        }
+        return false;
+      }
+
       graphCanvas.addEventListener('mousedown', function(e) {
         var rect = graphCanvas.getBoundingClientRect();
         var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        if (isOnLegend(mx, my)) return; // Don't drag when clicking legend
         var idx = findNodeAt(mx, my);
         if (idx >= 0) {
           graphDragging = graphNodes[idx];
@@ -892,9 +924,10 @@
           graphOffsetX = graphPanStart.ox + (e.clientX - graphPanStart.x);
           graphOffsetY = graphPanStart.oy + (e.clientY - graphPanStart.y);
         } else {
-          var idx = findNodeAt(mx, my);
+          var onLegend = isOnLegend(mx, my);
+          var idx = onLegend ? -1 : findNodeAt(mx, my);
           graphHovered = idx >= 0 ? idx : null;
-          graphCanvas.style.cursor = idx >= 0 ? 'pointer' : 'grab';
+          graphCanvas.style.cursor = onLegend ? 'pointer' : (idx >= 0 ? 'pointer' : 'grab');
 
           // Tooltip
           var tooltip = document.getElementById('graph-tooltip');
@@ -936,10 +969,24 @@
         graphScale = newScale;
       }, { passive: false });
 
-      // Click to show detail panel
+      // Click to show detail panel or toggle category filter
       graphCanvas.addEventListener('click', function(e) {
         var rect = graphCanvas.getBoundingClientRect();
         var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+        // Check legend hit areas first (screen space)
+        for (var li = 0; li < legendHitAreas.length; li++) {
+          var area = legendHitAreas[li];
+          if (mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h) {
+            if (graphFilterCategory === area.category) {
+              graphFilterCategory = null; // toggle off
+            } else {
+              graphFilterCategory = area.category; // set filter
+            }
+            return;
+          }
+        }
+
         var idx = findNodeAt(mx, my);
         if (idx >= 0) showGraphDetail(graphNodes[idx]);
       });
