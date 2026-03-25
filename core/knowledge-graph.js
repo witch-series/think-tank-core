@@ -524,9 +524,10 @@ function getSuggestedSearchPairs(limit = 3, recentTopics = []) {
     return recentLower.some(t => t.includes(label) || label.includes(t));
   }
 
-  // Separate weak (0-1 edges) and strong (2+ edges), excluding recently searched
-  const weak = keys.filter(k => edgeCounts[k] <= 1 && !isRecent(k))
-    .sort((a, b) => (graph.nodes[a]?.count || 0) - (graph.nodes[b]?.count || 0)); // least researched first
+  // Separate weak (0-2 edges) and strong (3+ edges), excluding recently searched
+  // Expanded threshold from 0-1 to 0-2 to be more aggressive about connecting nodes
+  const weak = keys.filter(k => edgeCounts[k] <= 2 && !isRecent(k))
+    .sort((a, b) => (edgeCounts[a] || 0) - (edgeCounts[b] || 0)); // least connected first
   const strong = keys.filter(k => edgeCounts[k] >= 2)
     .sort((a, b) => (edgeCounts[b] || 0) - (edgeCounts[a] || 0));
 
@@ -1189,4 +1190,64 @@ function autoConnect(onLog) {
   return graph;
 }
 
-module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode, autoConnect };
+/**
+ * Strengthen connections between keyword pairs that were searched together
+ * and produced meaningful results. This reduces isolated nodes by creating
+ * or strengthening edges when combined search finds related content.
+ * @param {Array<{weak: string, strong: string}>} pairs - keyword pairs that were searched together
+ * @param {string} topic - the research topic that found the connection
+ */
+function strengthenSearchPairConnections(pairs, topic) {
+  if (!pairs || pairs.length === 0) return;
+  const graph = loadGraph();
+  let strengthened = 0;
+
+  for (const pair of pairs) {
+    // Find nodes matching the pair labels (fuzzy match)
+    const weakKey = findNodeKey(graph, pair.weak);
+    const strongKey = findNodeKey(graph, pair.strong);
+    if (!weakKey || !strongKey || weakKey === strongKey) continue;
+
+    const pairKey = [weakKey, strongKey].sort().join('|');
+    const existing = graph.edges.find(e => {
+      const ek = [e.from, e.to].sort().join('|');
+      return ek === pairKey;
+    });
+
+    if (existing) {
+      // Strengthen existing edge — combined search confirmed the connection
+      existing.weight = (existing.weight || 1) + 2;
+      existing.relation = `複合検索で確認: ${(topic || '').slice(0, 40)}`;
+      strengthened++;
+    } else {
+      // Create new edge — combined search discovered a connection
+      graph.edges.push({
+        from: weakKey,
+        to: strongKey,
+        relation: `複合検索で発見: ${(topic || '').slice(0, 40)}`,
+        weight: 2
+      });
+      strengthened++;
+    }
+  }
+
+  if (strengthened > 0) saveGraph(graph);
+  return strengthened;
+}
+
+/**
+ * Find a node key by label (case-insensitive fuzzy match).
+ */
+function findNodeKey(graph, label) {
+  if (!label) return null;
+  const key = normalizeKey(label);
+  if (graph.nodes[key]) return key;
+  // Fuzzy: find node whose label matches
+  const lower = label.toLowerCase();
+  for (const [k, n] of Object.entries(graph.nodes)) {
+    if ((n.label || '').toLowerCase() === lower) return k;
+  }
+  return null;
+}
+
+module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect };

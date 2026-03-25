@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 // OllamaClient is passed as parameter to LLM-calling functions
-const { searchWeb, fetchPage, searchArxiv } = require('../explorers/searcher');
+const { searchWeb, fetchPage, searchArxiv, searchGitHub, classifySource } = require('../explorers/searcher');
 const { sanitizeText, containsSensitiveData } = require('./evolution');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 const { validateSyntax } = require('../lib/sandbox');
@@ -314,13 +314,22 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
     goalNote = '## 最終目標（検索結果がこの目標に関連するようにしてください）\n' + options.goalPrompt;
   }
 
+  // Build keyword combination context from graph search pairs
+  let keywordPairsNote = '';
+  if (options.searchPairs && options.searchPairs.length > 0) {
+    keywordPairsNote = '## キーワード組み合わせ検索（以下のキーワードペアを組み合わせたクエリを必ず1つ以上含めてください）\n' +
+      options.searchPairs.map(p => `- 「${p.weak}」と「${p.strong}」の関連性を調べるクエリ`).join('\n') +
+      '\n※ 孤立したキーワードではなく、複数キーワードを組み合わせて関連性を発見するクエリにしてください。';
+  }
+
   // Step 1: Ask LLM for search queries based on the task
   onLog('info', 'Generating search queries...');
   const queryPrompt = fillPrompt('search-queries.user', {
     taskDescription,
     visitedNote,
     similarNote,
-    goalNote
+    goalNote,
+    keywordPairsNote
   });
 
   const queryResponse = await client.query(queryPrompt);
@@ -341,22 +350,26 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
   // Step 2: Execute searches in parallel, then batch-fetch pages
   let totalSearchResults = 0;
 
-  // Run all web searches + arxiv concurrently
+  // Run all web searches + arxiv + github concurrently
   const englishQuery = queries.map(q => q.replace(/[^\x20-\x7E]/g, '').trim())
     .find(q => q.length >= 3) || taskDescription.replace(/[^\x20-\x7E]/g, '').trim();
 
-  const searchPromises = queries.map(q => searchWeb(q, 3).catch(() => []));
+  const searchPromises = queries.map(q => searchWeb(q, 5).catch(() => []));
   if (englishQuery && englishQuery.length >= 3) {
-    searchPromises.push(searchArxiv(englishQuery, 3).catch(() => []));
+    searchPromises.push(searchArxiv(englishQuery, 5).catch(() => []));
+    searchPromises.push(searchGitHub(englishQuery, 3).catch(() => []));
   }
 
-  onLog('info', `Searching ${searchPromises.length} sources in parallel...`);
+  onLog('info', `Searching ${searchPromises.length} sources in parallel (web + arxiv + github)...`);
   const searchResultSets = await Promise.all(searchPromises);
 
   // Collect search results and URLs to fetch
   const pagesToFetch = [];
+  const hasGitHub = englishQuery && englishQuery.length >= 3;
+  const hasArxiv = englishQuery && englishQuery.length >= 3;
+  const webResultCount = queries.length;
 
-  for (let i = 0; i < queries.length && i < searchResultSets.length; i++) {
+  for (let i = 0; i < webResultCount && i < searchResultSets.length; i++) {
     const searchResults = searchResultSets[i];
     totalSearchResults += searchResults.length;
 
@@ -364,20 +377,28 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
       collectedData.push({
         type: 'search_results',
         source: queries[i],
-        content: searchResults.map(r => `- ${r.title}: ${r.snippet}`).join('\n')
+        content: searchResults.map(r => `- [${r.type || 'web'}:${r.credibility || 0.5}] ${r.title}: ${r.snippet}`).join('\n')
       });
 
-      for (const result of searchResults.slice(0, 2)) {
+      for (const result of searchResults) {
         if (!result.url || result.url.includes('duckduckgo.com')) continue;
         if (visitedUrls.has(result.url)) continue;
-        pagesToFetch.push({ url: result.url, title: result.title, type: 'web_page' });
+        const srcInfo = classifySource(result.url);
+        pagesToFetch.push({
+          url: result.url,
+          title: result.title,
+          type: 'web_page',
+          credibility: srcInfo.credibility,
+          sourceType: srcInfo.type
+        });
       }
     }
   }
 
-  // Handle arxiv results (last entry if present)
-  if (englishQuery && englishQuery.length >= 3) {
-    const papers = searchResultSets[searchResultSets.length - 1] || [];
+  // Handle arxiv results
+  if (hasArxiv) {
+    const arxivIdx = webResultCount;
+    const papers = searchResultSets[arxivIdx] || [];
     if (papers.length > 0) {
       collectedData.push({
         type: 'arxiv_papers',
@@ -385,29 +406,74 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
         content: papers.map(p => `- [${p.title}] ${(p.summary || '').slice(0, 300)} (${p.url})`).join('\n')
       });
 
-      if (papers[0].url && !visitedUrls.has(papers[0].url)) {
-        pagesToFetch.push({ url: papers[0].url, title: papers[0].title, type: 'arxiv_page', maxLen: 6000 });
+      for (const paper of papers.slice(0, 3)) {
+        if (paper.url && !visitedUrls.has(paper.url)) {
+          pagesToFetch.push({
+            url: paper.url,
+            title: paper.title,
+            type: 'arxiv_page',
+            maxLen: 6000,
+            credibility: 1.0,
+            sourceType: 'academic'
+          });
+        }
       }
     }
   }
 
-  // Batch-fetch all pages in parallel
-  if (pagesToFetch.length > 0) {
-    onLog('info', `Fetching ${pagesToFetch.length} pages in parallel...`);
+  // Handle GitHub results
+  if (hasGitHub) {
+    const ghIdx = webResultCount + (hasArxiv ? 1 : 0);
+    const repos = searchResultSets[ghIdx] || [];
+    if (repos.length > 0) {
+      collectedData.push({
+        type: 'github_repos',
+        source: `github: ${englishQuery.slice(0, 60)}`,
+        content: repos.map(r => `- [${r.title}] ${r.snippet || ''} (${r.url})`).join('\n')
+      });
+
+      for (const repo of repos.slice(0, 2)) {
+        if (repo.url && !visitedUrls.has(repo.url)) {
+          pagesToFetch.push({
+            url: repo.url,
+            title: repo.title,
+            type: 'github_page',
+            credibility: 0.9,
+            sourceType: 'repository'
+          });
+        }
+      }
+    }
+  }
+
+  // Sort pages by credibility: academic > github > docs > other > blogs
+  pagesToFetch.sort((a, b) => (b.credibility || 0.5) - (a.credibility || 0.5));
+
+  // Fetch top pages (limit to avoid overload, but prioritize high-credibility)
+  const maxPages = 7;
+  const toFetch = pagesToFetch.slice(0, maxPages);
+
+  if (toFetch.length > 0) {
+    const typeBreakdown = {};
+    for (const p of toFetch) { typeBreakdown[p.sourceType || 'other'] = (typeBreakdown[p.sourceType || 'other'] || 0) + 1; }
+    onLog('info', `Fetching ${toFetch.length} pages by credibility: ${Object.entries(typeBreakdown).map(([k,v]) => `${k}:${v}`).join(', ')}`);
+
     const fetchResults = await Promise.all(
-      pagesToFetch.map(p => fetchPage(p.url, p.maxLen || 4000).catch(() => ({ url: p.url, error: 'fetch failed' })))
+      toFetch.map(p => fetchPage(p.url, p.maxLen || 4000).catch(() => ({ url: p.url, error: 'fetch failed' })))
     );
 
     for (let i = 0; i < fetchResults.length; i++) {
       const page = fetchResults[i];
-      const meta = pagesToFetch[i];
+      const meta = toFetch[i];
       newlyVisited.push(meta.url);
 
       if (page.text && page.text.length > 100) {
         collectedData.push({
           type: meta.type,
-          source: `${(meta.title || '').slice(0, 60)} (${meta.url.slice(0, 60)})`,
-          content: page.text.slice(0, 3000)
+          source: `[${meta.sourceType}] ${(meta.title || '').slice(0, 60)} (${meta.url.slice(0, 60)})`,
+          content: page.text.slice(0, 3000),
+          credibility: meta.credibility,
+          sourceType: meta.sourceType
         });
       }
     }
@@ -777,7 +843,8 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
     gatherResult = await gatherResearch(client, taskDescription, onLog, {
       visitedUrls: options.visitedUrls || [],
       recentTopics: options.recentTopics || [],
-      goalPrompt: options.goalPrompt
+      goalPrompt: options.goalPrompt,
+      searchPairs: options.searchPairs || []
     });
   } else if (mode === 'analyze') {
     const targetFolders = options.targetFolders || ['.'];

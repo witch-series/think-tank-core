@@ -22,7 +22,7 @@ const { parseJsonSafe } = require('./lib/json-parser');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
-const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getGraphStats, getGraphData, deleteNode, autoConnect } = require('./core/knowledge-graph');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect } = require('./core/knowledge-graph');
 const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
 const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
@@ -477,10 +477,12 @@ function scheduleAutonomousTasks() {
           const searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
 
           setPhase('searching', searchPrompt.slice(0, 60));
+          const searchPairs = getSuggestedSearchPairs(3, recentTopics);
           const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
             workLogDir, onLog: log, mode: 'research',
             visitedUrls, recentTopics,
-            goalPrompt: config.searchPrompt || ''
+            goalPrompt: config.searchPrompt || '',
+            searchPairs
           });
 
           if (result.visitedUrls && result.visitedUrls.length > 0) {
@@ -513,6 +515,16 @@ function scheduleAutonomousTasks() {
             updateGraph(ollamaClient, entry).catch(e =>
               log('debug', `Graph update failed: ${e.message}`)
             );
+
+            // Strengthen connections between keyword pairs that were searched together
+            if (searchPairs.length > 0) {
+              try {
+                const strengthened = strengthenSearchPairConnections(searchPairs, topic || searchPrompt.slice(0, 50));
+                if (strengthened > 0) log('info', `Strengthened ${strengthened} keyword pair connections from combined search`);
+              } catch (e) {
+                log('debug', `Connection strengthening failed: ${e.message}`);
+              }
+            }
           }
           actionResult = result;
           break;

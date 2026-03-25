@@ -167,22 +167,147 @@ async function searchDDG(query, maxResults = 5) {
   return results;
 }
 
+// --- Source credibility scoring ---
+
+/**
+ * Classify a URL by source type and assign a credibility score.
+ * Higher score = more credible/preferred source.
+ * @param {string} url - The URL to classify
+ * @returns {{type: string, credibility: number}}
+ */
+function classifySource(url) {
+  const lower = url.toLowerCase();
+
+  // Tier 1: Academic papers & preprints (credibility 1.0)
+  if (/arxiv\.org|scholar\.google|semanticscholar\.org|ieee\.org|acm\.org|springer\.com|nature\.com|sciencedirect\.com|researchgate\.net|openreview\.net|aclweb\.org|nips\.cc|proceedings\.mlr\.press|dl\.acm\.org|pubmed\.ncbi|biorxiv\.org/.test(lower)) {
+    return { type: 'academic', credibility: 1.0 };
+  }
+
+  // Tier 2: GitHub repos, issues, discussions (credibility 0.9)
+  if (/github\.com|gitlab\.com|bitbucket\.org/.test(lower)) {
+    return { type: 'repository', credibility: 0.9 };
+  }
+
+  // Tier 3: Official documentation & technical references (credibility 0.85)
+  if (/\.readthedocs\.io|docs\.|documentation\.|developer\.|devdocs\.io|spec\.|w3\.org|rfc-editor\.org|tc39\.es|pytorch\.org|tensorflow\.org|huggingface\.co/.test(lower)) {
+    return { type: 'documentation', credibility: 0.85 };
+  }
+
+  // Tier 4: Technical blogs from known organizations (credibility 0.7)
+  if (/openai\.com\/blog|deepmind\.com|ai\.googleblog|engineering\.|techblog\.|blog\.google|research\.facebook|aws\.amazon\.com\/blogs|cloud\.google\.com\/blog/.test(lower)) {
+    return { type: 'tech_org_blog', credibility: 0.7 };
+  }
+
+  // Tier 5: Q&A and wikis (credibility 0.6)
+  if (/stackoverflow\.com|stackexchange\.com|wikipedia\.org|wiki\./.test(lower)) {
+    return { type: 'wiki_qa', credibility: 0.6 };
+  }
+
+  // Low tier: YouTube, generic blogs, news aggregators (credibility 0.3)
+  if (/youtube\.com|youtu\.be|medium\.com|dev\.to|qiita\.com|zenn\.dev|note\.com|hatena|ameblo|livedoor|fc2\.com|wordpress\.com|blogspot\.com|tumblr\.com/.test(lower)) {
+    return { type: 'blog_video', credibility: 0.3 };
+  }
+
+  // Lowest tier: obvious non-technical (credibility 0.2)
+  if (/twitter\.com|x\.com|facebook\.com|instagram\.com|tiktok\.com|reddit\.com\/r\/(?!machinelearning|programming|compsci)/.test(lower)) {
+    return { type: 'social_media', credibility: 0.2 };
+  }
+
+  // Default: unknown sources get moderate score
+  return { type: 'other', credibility: 0.5 };
+}
+
+// --- GitHub Search ---
+
+/**
+ * Search GitHub repositories using the search page.
+ * @param {string} query - Search query
+ * @param {number} maxResults - Maximum number of results
+ * @returns {Promise<Array<{url: string, title: string, snippet: string, credibility: number}>>}
+ */
+async function searchGitHub(query, maxResults = 5) {
+  const q = encodeURIComponent(query);
+  const searchUrl = `https://github.com/search?q=${q}&type=repositories`;
+
+  try {
+    const res = await fetch(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9'
+      },
+      timeout: 20000
+    });
+
+    if (res.status !== 200) return [];
+
+    const html = res.body;
+    const results = [];
+
+    // Extract repo links from GitHub search results
+    const repoRegex = /href="(\/[^"]+\/[^"]+)" data-testid="results-list"/g;
+    const seen = new Set();
+    let match;
+
+    while ((match = repoRegex.exec(html)) !== null && results.length < maxResults) {
+      const repoPath = match[1];
+      if (seen.has(repoPath)) continue;
+      seen.add(repoPath);
+
+      const url = `https://github.com${repoPath}`;
+      const title = repoPath.slice(1); // Remove leading /
+
+      // Try to extract description near this link
+      const pos = match.index;
+      const nearby = html.slice(pos, Math.min(html.length, pos + 800));
+      const descMatch = nearby.match(/class="[^"]*topic-tag[^"]*"[^>]*>([^<]+)/i) ||
+                         nearby.match(/>([^<]{20,200})<\/p>/);
+      const snippet = descMatch ? decodeEntities(descMatch[1]).trim() : '';
+
+      results.push({ url, title, snippet, credibility: 0.9 });
+    }
+
+    // Fallback: try simpler pattern if data-testid not found
+    if (results.length === 0) {
+      const simpleRegex = /href="(\/[\w\-]+\/[\w\-]+)"[^>]*>\s*<span[^>]*>[\w\-]+\s*\/\s*<\/span>/g;
+      while ((match = simpleRegex.exec(html)) !== null && results.length < maxResults) {
+        const repoPath = match[1];
+        if (seen.has(repoPath)) continue;
+        if (repoPath.includes('/search') || repoPath.includes('/settings')) continue;
+        seen.add(repoPath);
+        const url = `https://github.com${repoPath}`;
+        results.push({ url, title: repoPath.slice(1), snippet: '', credibility: 0.9 });
+      }
+    }
+
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 // --- Combined search with fallback ---
 
 /**
  * Search the web using Brave Search (primary) with DuckDuckGo fallback.
+ * Results include credibility scores.
  * @param {string} query - Search query
  * @param {number} maxResults - Maximum number of results
- * @returns {Promise<Array<{url: string, title: string, snippet: string}>>}
+ * @returns {Promise<Array<{url: string, title: string, snippet: string, credibility: number}>>}
  */
 async function searchWeb(query, maxResults = 5) {
   // Try Brave first
   let results = await searchBrave(query, maxResults);
-  if (results.length > 0) return results;
+  if (results.length === 0) {
+    // Fallback to DuckDuckGo
+    results = await searchDDG(query, maxResults);
+  }
 
-  // Fallback to DuckDuckGo
-  results = await searchDDG(query, maxResults);
-  return results;
+  // Attach credibility scores to all results
+  return results.map(r => ({
+    ...r,
+    ...classifySource(r.url)
+  }));
 }
 
 /**
@@ -287,4 +412,4 @@ async function searchArxiv(query, maxResults = 5) {
   }
 }
 
-module.exports = { searchWeb, fetchPage, searchArxiv };
+module.exports = { searchWeb, fetchPage, searchArxiv, searchGitHub, classifySource };
