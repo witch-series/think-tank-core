@@ -203,9 +203,14 @@ function classifySource(url) {
     return { type: 'wiki_qa', credibility: 0.6 };
   }
 
-  // Low tier: YouTube, generic blogs, news aggregators (credibility 0.3)
-  if (/youtube\.com|youtu\.be|medium\.com|dev\.to|qiita\.com|zenn\.dev|note\.com|hatena|ameblo|livedoor|fc2\.com|wordpress\.com|blogspot\.com|tumblr\.com/.test(lower)) {
-    return { type: 'blog_video', credibility: 0.3 };
+  // Blocked: YouTube and video platforms (not useful as research sources)
+  if (/youtube\.com|youtu\.be/.test(lower)) {
+    return { type: 'blocked', credibility: 0 };
+  }
+
+  // Low tier: generic blogs, news aggregators (credibility 0.3)
+  if (/medium\.com|dev\.to|qiita\.com|zenn\.dev|note\.com|hatena|ameblo|livedoor|fc2\.com|wordpress\.com|blogspot\.com|tumblr\.com/.test(lower)) {
+    return { type: 'blog', credibility: 0.3 };
   }
 
   // Lowest tier: obvious non-technical (credibility 0.2)
@@ -303,11 +308,11 @@ async function searchWeb(query, maxResults = 5) {
     results = await searchDDG(query, maxResults);
   }
 
-  // Attach credibility scores to all results
+  // Attach credibility scores and filter out blocked sources
   return results.map(r => ({
     ...r,
     ...classifySource(r.url)
-  }));
+  })).filter(r => r.type !== 'blocked');
 }
 
 /**
