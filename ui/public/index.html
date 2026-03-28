@@ -118,6 +118,24 @@
     #graph-detail .gd-link:hover { color: #8be9fd; text-decoration: underline; }
     #graph-detail .gd-tag { display: inline-block; background: #282a36; color: #f1fa8c; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin: 2px 2px 2px 0; cursor: pointer; }
     #graph-detail .gd-tag:hover { background: #44475a; }
+
+    /* Voice UI */
+    #chat-mic { background: #44475a; color: #f8f8f2; border: 1px solid #555; padding: 8px 12px; cursor: pointer; font-size: 16px; border-radius: 4px; line-height: 1; }
+    #chat-mic:hover { background: #6272a4; }
+    #chat-mic.recording { background: #ff5555; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .tts-play-btn { background: none; border: 1px solid #444; color: #bd93f9; padding: 2px 8px; margin-left: 8px; cursor: pointer; font-size: 12px; border-radius: 3px; vertical-align: middle; }
+    .tts-play-btn:hover { border-color: #bd93f9; }
+    .tts-play-btn.playing { color: #50fa7b; border-color: #50fa7b; }
+
+    /* Settings */
+    .setting-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-size: 13px; }
+    .setting-row label { width: 200px; color: #888; flex-shrink: 0; }
+    .setting-row input[type="text"], .setting-row select { flex: 1; background: #111; border: 1px solid #333; color: #f8f8f2; padding: 6px 8px; font-family: inherit; font-size: 13px; border-radius: 4px; }
+    .setting-row input[type="text"]:focus, .setting-row select:focus { outline: none; border-color: #bd93f9; }
+    .setting-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: #bd93f9; }
+    .setting-btn { background: #44475a; color: #f8f8f2; border: 1px solid #555; padding: 6px 16px; cursor: pointer; font-family: inherit; font-size: 13px; border-radius: 4px; }
+    .setting-btn:hover { background: #6272a4; }
   </style>
 </head>
 <body>
@@ -140,6 +158,7 @@
     <div class="tab" data-tab="knowledge">Knowledge DB</div>
     <div class="tab" data-tab="logs">Logs</div>
     <div class="tab" data-tab="status">Status</div>
+    <div class="tab" data-tab="settings">Settings</div>
   </div>
 
   <div class="tab-body">
@@ -148,6 +167,7 @@
       <div class="chat-area" id="chat-area"></div>
       <div class="chat-input">
         <input type="text" id="chat-input" placeholder="メッセージを入力..." />
+        <button id="chat-mic" title="音声入力 (STT)">&#x1F3A4;</button>
         <button id="chat-send">Send</button>
       </div>
     </div>
@@ -199,8 +219,114 @@
 
     <!-- Status -->
     <div id="tab-status" class="tab-content">
-      <div class="status-scroll" id="status-body">
-        <div class="empty">Connecting...</div>
+      <div class="status-scroll">
+        <!-- Controls -->
+        <div class="status-section" id="status-controls">
+          <h3>Controls</h3>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;padding:4px 0;">
+            <button class="setting-btn" id="ctrl-pause" title="Pause autonomous loop">Pause</button>
+            <button class="setting-btn" id="ctrl-resume" title="Resume autonomous loop">Resume</button>
+            <input type="text" id="ctrl-analyze-path" placeholder="./brain/modules" style="flex:1;min-width:150px;background:#111;border:1px solid #333;color:#f8f8f2;padding:6px 8px;font-family:inherit;font-size:13px;border-radius:4px;" />
+            <button class="setting-btn" id="ctrl-analyze">Analyze</button>
+          </div>
+          <div style="display:flex;gap:8px;padding:6px 0;">
+            <input type="text" id="ctrl-inject-topic" placeholder="Research topic to inject..." style="flex:1;background:#111;border:1px solid #333;color:#f8f8f2;padding:6px 8px;font-family:inherit;font-size:13px;border-radius:4px;" />
+            <button class="setting-btn" id="ctrl-inject">Inject Research</button>
+          </div>
+          <div id="ctrl-status-msg" style="font-size:11px;color:#50fa7b;padding:2px 0;"></div>
+        </div>
+        <!-- Server status (dynamically updated) -->
+        <div id="status-body">
+          <div class="empty">Connecting...</div>
+        </div>
+        <!-- Goals -->
+        <div class="status-section" id="status-goals">
+          <h3>Goals</h3>
+          <div id="goals-body" class="empty">Loading...</div>
+        </div>
+        <!-- Feedback -->
+        <div class="status-section" id="status-feedback">
+          <h3>Feedback</h3>
+          <div id="feedback-body" class="empty">Loading...</div>
+        </div>
+        <!-- Curiosities -->
+        <div class="status-section" id="status-curiosities">
+          <h3>Curiosities</h3>
+          <div id="curiosities-body" class="empty">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div id="tab-settings" class="tab-content">
+      <div class="status-scroll" style="padding: 16px;">
+        <div class="status-section">
+          <h3>Server (settings.json)</h3>
+          <div class="setting-row">
+            <label>Ollama URL</label>
+            <input type="text" id="setting-ollama-url" placeholder="http://localhost:11434" />
+          </div>
+          <div class="setting-row">
+            <label>Ollama Model</label>
+            <input type="text" id="setting-ollama-model" placeholder="gemma3:4b" />
+          </div>
+          <div class="setting-row">
+            <label>Dream Model</label>
+            <input type="text" id="setting-ollama-dream-model" placeholder="gpt-oss:20b" />
+          </div>
+          <div class="setting-row">
+            <label>Search Prompt (Goal)</label>
+            <input type="text" id="setting-search-prompt" placeholder="調査テーマを入力..." />
+          </div>
+          <div class="setting-row">
+            <label>Task Interval (ms)</label>
+            <input type="text" id="setting-task-interval" placeholder="60000" />
+          </div>
+          <div class="setting-row">
+            <label>Dream Hour (0-23)</label>
+            <input type="text" id="setting-dream-hour" placeholder="5" />
+          </div>
+          <div class="setting-row">
+            <label>API Port</label>
+            <input type="text" id="setting-server-port" placeholder="2500" />
+          </div>
+          <div style="padding: 6px 0;">
+            <button class="setting-btn" id="setting-save-server" style="background:#2a1a3e;border-color:#bd93f9;color:#bd93f9;">Save Server Settings</button>
+            <span id="setting-server-status" style="margin-left:12px;color:#50fa7b;font-size:12px;"></span>
+          </div>
+          <div style="font-size:11px;color:#666;padding-top:4px;">Port changes require restart. Ollama settings apply immediately.</div>
+        </div>
+        <div class="status-section">
+          <h3>Voice Input (faster-whisper)</h3>
+          <div class="setting-row">
+            <label>API URL</label>
+            <input type="text" id="setting-whisper-url" placeholder="http://localhost:8000" />
+          </div>
+          <div class="setting-row">
+            <label>Language</label>
+            <input type="text" id="setting-stt-lang" placeholder="ja" />
+          </div>
+        </div>
+        <div class="status-section">
+          <h3>Voice Output (VOICEVOX)</h3>
+          <div class="setting-row">
+            <label>API URL</label>
+            <input type="text" id="setting-voicevox-url" placeholder="http://localhost:50021" />
+          </div>
+          <div class="setting-row">
+            <label>Speaker</label>
+            <select id="setting-speaker-id"><option value="0">0 - Default</option></select>
+            <button class="setting-btn" id="setting-load-speakers">Load Speakers</button>
+          </div>
+          <div class="setting-row">
+            <label>Auto-play TTS</label>
+            <input type="checkbox" id="setting-autoplay" />
+          </div>
+        </div>
+        <div class="status-section" style="border-bottom:none;">
+          <button class="setting-btn" id="setting-save-voice" style="background:#2a1a3e;border-color:#bd93f9;color:#bd93f9;">Save Voice Settings</button>
+          <span id="setting-voice-status" style="margin-left:12px;color:#50fa7b;font-size:12px;"></span>
+        </div>
       </div>
     </div>
   </div>
@@ -208,6 +334,253 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script>
     let apiUrl = window.location.protocol + '//' + window.location.hostname + ':2500';
+
+    // --- Voice Settings (localStorage) ---
+    const VOICE_SETTINGS_KEY = 'think-tank-voice-settings';
+    const DEFAULT_VOICE_SETTINGS = {
+      whisperUrl: 'http://localhost:8000',
+      voicevoxUrl: 'http://localhost:50021',
+      speakerId: 0,
+      autoPlay: false,
+      sttLanguage: 'ja'
+    };
+
+    function loadVoiceSettings() {
+      try {
+        const stored = localStorage.getItem(VOICE_SETTINGS_KEY);
+        if (stored) return Object.assign({}, DEFAULT_VOICE_SETTINGS, JSON.parse(stored));
+      } catch {}
+      return Object.assign({}, DEFAULT_VOICE_SETTINGS);
+    }
+
+    function saveVoiceSettings(settings) {
+      localStorage.setItem(VOICE_SETTINGS_KEY, JSON.stringify(settings));
+    }
+
+    // --- VOICEVOX TTS ---
+    let currentAudio = null;
+
+    async function playTTS(text, btn) {
+      const settings = loadVoiceSettings();
+      const voicevoxUrl = settings.voicevoxUrl;
+      const speakerId = settings.speakerId;
+
+      // Strip markdown formatting for cleaner TTS
+      const cleanText = text.replace(/[#*`\[\]()>_~|]/g, '').replace(/\n{2,}/g, '。').replace(/\n/g, '、').trim();
+      if (!cleanText) return;
+
+      if (btn) { btn.classList.add('playing'); btn.textContent = '...'; }
+
+      try {
+        // Step 1: Get audio query
+        const queryRes = await fetch(voicevoxUrl + '/audio_query?text=' + encodeURIComponent(cleanText) + '&speaker=' + speakerId, {
+          method: 'POST'
+        });
+        if (!queryRes.ok) throw new Error('audio_query failed: ' + queryRes.status);
+        const audioQuery = await queryRes.json();
+
+        // Step 2: Synthesize audio
+        const synthRes = await fetch(voicevoxUrl + '/synthesis?speaker=' + speakerId, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(audioQuery)
+        });
+        if (!synthRes.ok) throw new Error('synthesis failed: ' + synthRes.status);
+        const audioBlob = await synthRes.blob();
+
+        // Step 3: Play audio
+        if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+        const audioUrl = URL.createObjectURL(audioBlob);
+        currentAudio = new Audio(audioUrl);
+        currentAudio.onended = function() {
+          if (btn) { btn.classList.remove('playing'); btn.textContent = '\u25B6'; }
+          URL.revokeObjectURL(audioUrl);
+          currentAudio = null;
+        };
+        currentAudio.onerror = function() {
+          if (btn) { btn.classList.remove('playing'); btn.textContent = '\u25B6'; }
+          URL.revokeObjectURL(audioUrl);
+          currentAudio = null;
+        };
+        currentAudio.play();
+      } catch (e) {
+        console.error('TTS failed:', e);
+        if (btn) { btn.classList.remove('playing'); btn.textContent = '\u25B6'; }
+      }
+    }
+
+    // --- faster-whisper STT ---
+    let mediaRecorder = null;
+    let audioChunks = [];
+
+    function initSTT() {
+      const micBtn = document.getElementById('chat-mic');
+      if (!micBtn) return;
+
+      micBtn.addEventListener('click', async function() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+          micBtn.classList.remove('recording');
+          micBtn.innerHTML = '&#x1F3A4;';
+          return;
+        }
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          mediaRecorder = new MediaRecorder(stream, {
+            mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4'
+          });
+          audioChunks = [];
+
+          mediaRecorder.ondataavailable = function(e) {
+            if (e.data.size > 0) audioChunks.push(e.data);
+          };
+
+          mediaRecorder.onstop = async function() {
+            stream.getTracks().forEach(function(t) { t.stop(); });
+            const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+
+            const settings = loadVoiceSettings();
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'recording.webm');
+            formData.append('language', settings.sttLanguage);
+
+            micBtn.innerHTML = '...';
+            try {
+              const res = await fetch(settings.whisperUrl + '/transcribe', {
+                method: 'POST',
+                body: formData
+              });
+              if (!res.ok) throw new Error('STT failed: ' + res.status);
+              const data = await res.json();
+              const transcription = data.text || data.transcription || '';
+              if (transcription) {
+                document.getElementById('chat-input').value = transcription;
+                document.getElementById('chat-input').focus();
+              }
+            } catch (e) {
+              console.error('STT failed:', e);
+            }
+            micBtn.innerHTML = '&#x1F3A4;';
+          };
+
+          mediaRecorder.start();
+          micBtn.classList.add('recording');
+          micBtn.innerHTML = '&#x23F9;';
+        } catch (e) {
+          console.error('Microphone access failed:', e);
+        }
+      });
+    }
+
+    // --- Settings Tab ---
+    function initSettings() {
+      // --- Voice settings (localStorage) ---
+      const voiceSettings = loadVoiceSettings();
+      document.getElementById('setting-whisper-url').value = voiceSettings.whisperUrl;
+      document.getElementById('setting-voicevox-url').value = voiceSettings.voicevoxUrl;
+      document.getElementById('setting-speaker-id').value = voiceSettings.speakerId;
+      document.getElementById('setting-autoplay').checked = voiceSettings.autoPlay;
+      document.getElementById('setting-stt-lang').value = voiceSettings.sttLanguage;
+
+      document.getElementById('setting-save-voice').addEventListener('click', function() {
+        const s = {
+          whisperUrl: document.getElementById('setting-whisper-url').value.trim(),
+          voicevoxUrl: document.getElementById('setting-voicevox-url').value.trim(),
+          speakerId: parseInt(document.getElementById('setting-speaker-id').value, 10) || 0,
+          autoPlay: document.getElementById('setting-autoplay').checked,
+          sttLanguage: document.getElementById('setting-stt-lang').value.trim() || 'ja'
+        };
+        saveVoiceSettings(s);
+        const status = document.getElementById('setting-voice-status');
+        status.textContent = 'Saved!';
+        setTimeout(function() { status.textContent = ''; }, 2000);
+      });
+
+      document.getElementById('setting-load-speakers').addEventListener('click', async function() {
+        const voicevoxUrl = document.getElementById('setting-voicevox-url').value.trim();
+        try {
+          const res = await fetch(voicevoxUrl + '/speakers');
+          if (!res.ok) throw new Error('Failed: ' + res.status);
+          const speakers = await res.json();
+          const select = document.getElementById('setting-speaker-id');
+          select.innerHTML = '';
+          for (const speaker of speakers) {
+            for (const style of (speaker.styles || [])) {
+              const opt = document.createElement('option');
+              opt.value = style.id;
+              opt.textContent = style.id + ' - ' + speaker.name + ' (' + style.name + ')';
+              select.appendChild(opt);
+            }
+          }
+          const cur = loadVoiceSettings();
+          select.value = cur.speakerId;
+        } catch (e) {
+          console.error('Failed to load speakers:', e);
+          const status = document.getElementById('setting-voice-status');
+          status.textContent = 'Speaker list load failed';
+          status.style.color = '#ff5555';
+          setTimeout(function() { status.textContent = ''; status.style.color = '#50fa7b'; }, 3000);
+        }
+      });
+
+      // --- Server settings (settings.json via API) ---
+      loadServerSettings();
+
+      document.getElementById('setting-save-server').addEventListener('click', async function() {
+        const updates = {
+          ollama: {
+            url: document.getElementById('setting-ollama-url').value.trim(),
+            model: document.getElementById('setting-ollama-model').value.trim(),
+            dreamModel: document.getElementById('setting-ollama-dream-model').value.trim()
+          },
+          searchPrompt: document.getElementById('setting-search-prompt').value.trim(),
+          taskInterval: document.getElementById('setting-task-interval').value.trim(),
+          dreamHour: document.getElementById('setting-dream-hour').value.trim(),
+          server: {
+            port: document.getElementById('setting-server-port').value.trim()
+          }
+        };
+        const status = document.getElementById('setting-server-status');
+        try {
+          const res = await fetch(apiUrl + '/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates)
+          });
+          const data = await res.json();
+          if (data.ok) {
+            status.textContent = 'Saved!';
+            status.style.color = '#50fa7b';
+          } else {
+            status.textContent = 'Error: ' + (data.error || 'unknown');
+            status.style.color = '#ff5555';
+          }
+        } catch (e) {
+          status.textContent = 'Connection error';
+          status.style.color = '#ff5555';
+        }
+        setTimeout(function() { status.textContent = ''; }, 3000);
+      });
+    }
+
+    async function loadServerSettings() {
+      try {
+        const res = await fetch(apiUrl + '/settings');
+        const s = await res.json();
+        if (s.ollama) {
+          document.getElementById('setting-ollama-url').value = s.ollama.url || '';
+          document.getElementById('setting-ollama-model').value = s.ollama.model || '';
+          document.getElementById('setting-ollama-dream-model').value = s.ollama.dreamModel || '';
+        }
+        document.getElementById('setting-search-prompt').value = s.searchPrompt || '';
+        document.getElementById('setting-task-interval').value = s.taskInterval || 60000;
+        document.getElementById('setting-dream-hour').value = s.dreamHour !== undefined ? s.dreamHour : 5;
+        document.getElementById('setting-server-port').value = s.server && s.server.port ? s.server.port : 2500;
+      } catch (e) {
+        console.error('Failed to load server settings:', e);
+      }
+    }
 
     // Configure marked for safe rendering
     if (typeof marked !== 'undefined') {
@@ -279,7 +652,8 @@
             planning: 'Planning', searching: 'Searching', saving: 'Saving',
             organizing: 'Organizing', generating: 'Generating', analyzing: 'Analyzing',
             improving: 'Improving', research: 'Research', deep_research: 'Deep Research',
-            analyze_code: 'Analyzing', improve_code: 'Improving', generate_script: 'Generating'
+            analyze_code: 'Analyzing', improve_code: 'Improving', generate_script: 'Generating',
+            curiosity: 'Curiosity'
           };
           document.getElementById('activity-phase').textContent = phaseLabels[act.phase] || act.phase;
           document.getElementById('activity-detail').textContent = act.detail || '';
@@ -316,12 +690,153 @@
             '<div class="stat"><span class="label">Message</span><span class="value">' + esc(data.lastCommit ? data.lastCommit.message : '\u2014') + '</span></div>' +
             (data.lastCommit ? '<div class="stat"><span class="label">Date</span><span class="value">' + esc(data.lastCommit.date || '') + '</span></div>' : '') +
           '</div>';
+
+        // Update pause/resume button states
+        document.getElementById('ctrl-pause').disabled = tm.paused;
+        document.getElementById('ctrl-resume').disabled = !tm.paused;
       } catch {
         document.getElementById('conn').className = 'dot err';
         document.getElementById('header-status').textContent = 'OFFLINE';
         document.getElementById('activity-bar').classList.remove('active');
         document.getElementById('status-body').innerHTML = '<div class="empty" style="color:#ff5555">Connection failed</div>';
       }
+    }
+
+    // --- Goals ---
+    async function fetchGoals() {
+      try {
+        const res = await fetch(apiUrl + '/goals');
+        const data = await res.json();
+        const el = document.getElementById('goals-body');
+        if (!data.summary) {
+          el.innerHTML = '<span style="color:#666">No goal set</span>';
+          return;
+        }
+        var html = '<div class="stat"><span class="label">Progress</span><span class="value">' +
+          esc(data.summary.progress + ' (' + data.summary.percentage + '%)') + '</span></div>';
+        if (data.nextSubtask) {
+          html += '<div class="stat"><span class="label">Next</span><span class="value">' +
+            esc('[' + data.nextSubtask.id + '] (' + data.nextSubtask.type + ') ' + data.nextSubtask.description) + '</span></div>';
+        }
+        if (data.summary.subtasks && data.summary.subtasks.length > 0) {
+          html += '<div style="margin-top:6px;font-size:12px;">';
+          for (var i = 0; i < data.summary.subtasks.length; i++) {
+            var st = data.summary.subtasks[i];
+            var icon = st.status === 'completed' ? '\u2705' : st.status === 'in_progress' ? '\u23F3' : '\u2B55';
+            html += '<div style="padding:2px 0;color:' + (st.status === 'completed' ? '#50fa7b' : st.status === 'in_progress' ? '#f1fa8c' : '#888') + ';">' +
+              icon + ' ' + esc(st.description || st.id) + '</div>';
+          }
+          html += '</div>';
+        }
+        el.innerHTML = html;
+      } catch {
+        document.getElementById('goals-body').innerHTML = '<span style="color:#666">Failed to load</span>';
+      }
+    }
+
+    // --- Feedback ---
+    async function fetchFeedback() {
+      try {
+        const res = await fetch(apiUrl + '/feedback');
+        const data = await res.json();
+        const el = document.getElementById('feedback-body');
+        if (!data.totalActions) {
+          el.innerHTML = '<span style="color:#666">No data yet</span>';
+          return;
+        }
+        var html = '<div class="stat"><span class="label">Success Rate</span><span class="value">' +
+          Math.round(data.successRate * 100) + '% (' + data.totalActions + ' actions)</span></div>';
+        var actions = Object.keys(data.byAction || {});
+        for (var i = 0; i < actions.length; i++) {
+          var a = actions[i], d = data.byAction[a];
+          var rate = d.total > 0 ? Math.round((d.success / d.total) * 100) : 0;
+          html += '<div class="stat"><span class="label">' + esc(a) + '</span><span class="value">' +
+            rate + '% (' + d.success + '/' + d.total + ')</span></div>';
+        }
+        if (data.recentFailures && data.recentFailures.length > 0) {
+          html += '<div style="margin-top:6px;font-size:11px;color:#ff5555;">';
+          for (var j = 0; j < data.recentFailures.length; j++) {
+            html += '<div style="padding:1px 0;">' + esc(data.recentFailures[j]) + '</div>';
+          }
+          html += '</div>';
+        }
+        el.innerHTML = html;
+      } catch {
+        document.getElementById('feedback-body').innerHTML = '<span style="color:#666">Failed to load</span>';
+      }
+    }
+
+    // --- Curiosities ---
+    async function fetchCuriosities() {
+      try {
+        const res = await fetch(apiUrl + '/curiosities');
+        const data = await res.json();
+        const el = document.getElementById('curiosities-body');
+        if (!Array.isArray(data) || data.length === 0) {
+          el.innerHTML = '<span style="color:#666">No curiosities yet</span>';
+          return;
+        }
+        var html = '';
+        for (var i = data.length - 1; i >= Math.max(0, data.length - 20); i--) {
+          var c = data[i];
+          var icon = c.explored ? '\u2705' : '\u2B55';
+          var color = c.explored ? '#6272a4' : '#f8f8f2';
+          html += '<div style="padding:3px 0;font-size:12px;color:' + color + ';">' +
+            icon + ' ' + esc(c.topic) +
+            '<span style="color:#6272a4;font-size:10px;margin-left:8px;">' + esc(c.source) +
+            (c.explored ? ' \u2014 explored' : '') + '</span></div>';
+        }
+        el.innerHTML = html;
+      } catch {
+        document.getElementById('curiosities-body').innerHTML = '<span style="color:#666">Failed to load</span>';
+      }
+    }
+
+    // --- Controls event handlers ---
+    function initControls() {
+      document.getElementById('ctrl-pause').addEventListener('click', async function() {
+        try {
+          await fetch(apiUrl + '/pause', { method: 'POST' });
+          showCtrlMsg('Paused');
+        } catch { showCtrlMsg('Error', true); }
+      });
+      document.getElementById('ctrl-resume').addEventListener('click', async function() {
+        try {
+          await fetch(apiUrl + '/resume', { method: 'POST' });
+          showCtrlMsg('Resumed');
+        } catch { showCtrlMsg('Error', true); }
+      });
+      document.getElementById('ctrl-analyze').addEventListener('click', async function() {
+        var folder = document.getElementById('ctrl-analyze-path').value.trim() || './brain/modules';
+        try {
+          await fetch(apiUrl + '/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: folder })
+          });
+          showCtrlMsg('Analyze queued: ' + folder);
+        } catch { showCtrlMsg('Error', true); }
+      });
+      document.getElementById('ctrl-inject').addEventListener('click', async function() {
+        var topic = document.getElementById('ctrl-inject-topic').value.trim();
+        if (!topic) return;
+        try {
+          await fetch(apiUrl + '/inject', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ topic: topic })
+          });
+          document.getElementById('ctrl-inject-topic').value = '';
+          showCtrlMsg('Research injected: ' + topic.slice(0, 50));
+        } catch { showCtrlMsg('Error', true); }
+      });
+    }
+
+    function showCtrlMsg(msg, isError) {
+      var el = document.getElementById('ctrl-status-msg');
+      el.textContent = msg;
+      el.style.color = isError ? '#ff5555' : '#50fa7b';
+      setTimeout(function() { el.textContent = ''; }, 3000);
     }
 
     // --- Logs ---
@@ -344,11 +859,25 @@
     const chatInput = document.getElementById('chat-input');
     const chatSend = document.getElementById('chat-send');
 
-    function addChatMsg(role, text) {
+    function addChatMsg(role, text, skipAutoPlay) {
       const div = document.createElement('div');
       div.className = 'chat-msg ' + role;
       if (role === 'assistant') {
         div.innerHTML = '<span class="role-label">AI: </span><span class="md-body">' + renderMd(text) + '</span>';
+        // TTS play button
+        const playBtn = document.createElement('button');
+        playBtn.className = 'tts-play-btn';
+        playBtn.textContent = '\u25B6';
+        playBtn.title = 'Read aloud (VOICEVOX)';
+        playBtn.onclick = function() { playTTS(text, playBtn); };
+        div.appendChild(playBtn);
+        // Auto-play if enabled and not loading history
+        if (!skipAutoPlay) {
+          const settings = loadVoiceSettings();
+          if (settings.autoPlay) {
+            setTimeout(function() { playTTS(text, playBtn); }, 300);
+          }
+        }
       } else if (role === 'user') {
         div.innerHTML = '<span class="role-label">You: </span>' + esc(text);
       } else {
@@ -545,7 +1074,7 @@
           chatArea.innerHTML = '';
           for (const msg of history) {
             if (msg.role === 'user' || msg.role === 'assistant') {
-              addChatMsg(msg.role, msg.text);
+              addChatMsg(msg.role, msg.text, true);
             }
           }
         }
@@ -1211,14 +1740,23 @@
         apiUrl = data.url;
       } catch {}
       await loadChatHistory();
+      initSTT();
+      initSettings();
+      initControls();
       fetchStatus();
       fetchLogs();
       fetchSummary();
       fetchKnowledgeDB();
+      fetchGoals();
+      fetchFeedback();
+      fetchCuriosities();
       setInterval(fetchStatus, 5000);
       setInterval(fetchLogs, 5000);
       setInterval(fetchSummary, 10000);
       setInterval(fetchKnowledgeDB, 10000);
+      setInterval(fetchGoals, 10000);
+      setInterval(fetchFeedback, 15000);
+      setInterval(fetchCuriosities, 15000);
     }
     init();
   </script>

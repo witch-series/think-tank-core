@@ -105,6 +105,47 @@ function saveChatMessage(role, text) {
   fs.writeFileSync(CHAT_HISTORY_PATH, JSON.stringify(history), 'utf-8');
 }
 
+// --- Curiosity System ---
+const CURIOSITIES_PATH = path.join(ROOT, 'brain', 'curiosities.json');
+const MAX_CURIOSITIES = 100;
+
+function loadCuriosities() {
+  try {
+    if (fs.existsSync(CURIOSITIES_PATH)) return JSON.parse(fs.readFileSync(CURIOSITIES_PATH, 'utf-8'));
+  } catch {}
+  return [];
+}
+
+function saveCuriosities(items) {
+  const dir = path.dirname(CURIOSITIES_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const trimmed = items.slice(-MAX_CURIOSITIES);
+  fs.writeFileSync(CURIOSITIES_PATH, JSON.stringify(trimmed, null, 2), 'utf-8');
+}
+
+function addCuriosity(topic, source) {
+  const items = loadCuriosities();
+  const isDupe = items.some(c => !c.explored && c.topic.slice(0, 30) === topic.slice(0, 30));
+  if (isDupe) return;
+  items.push({ topic, source, timestamp: new Date().toISOString(), explored: false });
+  saveCuriosities(items);
+}
+
+function getNextCuriosity() {
+  const items = loadCuriosities();
+  return items.find(c => !c.explored) || null;
+}
+
+function markCuriosityExplored(topic) {
+  const items = loadCuriosities();
+  const item = items.find(c => c.topic === topic && !c.explored);
+  if (item) {
+    item.explored = true;
+    item.exploredAt = new Date().toISOString();
+    saveCuriosities(items);
+  }
+}
+
 // --- Config ---
 let config;
 let ollamaClient = null;
@@ -128,6 +169,15 @@ taskManager.on('idle', () => {
     scheduleAutonomousTasks();
   } catch (e) {
     log('error', `Failed to schedule autonomous cycle: ${e.message}`);
+    // Safety: retry after delay to prevent permanent stall
+    setTimeout(() => {
+      if (!restarting && !taskManager.currentTask && taskManager.queue.length === 0) {
+        log('info', 'Recovery: re-seeding autonomous loop after idle failure');
+        try { scheduleAutonomousTasks(); } catch (e2) {
+          log('error', `Recovery also failed: ${e2.message}`);
+        }
+      }
+    }, 10000);
   }
 });
 
@@ -158,9 +208,9 @@ function addVisitedUrls(newUrls) {
   saveVisitedUrls([...set]);
 }
 
-// --- Helper: detect research intent from user chat and update searchPrompt ---
+// --- Helper: detect research intent from user chat and store as curiosity ---
 
-function detectAndUpdateSearchPrompt(client, userMessage) {
+function detectAndStoreCuriosity(client, userMessage) {
   // Fire-and-forget — don't block the chat response
   (async () => {
     try {
@@ -170,21 +220,9 @@ function detectAndUpdateSearchPrompt(client, userMessage) {
       const parsed = parseJsonSafe(text);
       if (!parsed) return;
       if (parsed.isResearch && parsed.searchPrompt && parsed.searchPrompt !== 'null') {
-        // User's chat contains a research directive → update the user-facing searchPrompt
-        config.searchPrompt = parsed.searchPrompt;
-        log('info', `searchPrompt updated by user: "${parsed.searchPrompt.slice(0, 80)}"`);
-
-        // Persist to settings.json
-        try {
-          const settingsPath = path.join(ROOT, 'config', 'settings.json');
-          if (fs.existsSync(settingsPath)) {
-            const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-            settings.searchPrompt = parsed.searchPrompt;
-            fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
-          }
-        } catch (e) {
-          log('warn', `Failed to persist searchPrompt: ${e.message}`);
-        }
+        // Store as curiosity — never modify the main goal (searchPrompt)
+        addCuriosity(parsed.searchPrompt, 'user_chat');
+        log('info', `Curiosity recorded from chat: "${parsed.searchPrompt.slice(0, 80)}"`);
       }
     } catch (e) {
       log('debug', `Research intent detection failed: ${e.message}`);
@@ -322,6 +360,7 @@ function scheduleAutonomousTasks() {
 
   // Single task: LLM decides what to do next
   taskManager.enqueue(createTask('autonomous:plan', async () => {
+   try {
     const researchDbPath = getResearchDbPath();
     const analysisDbPath = getAnalysisDbPath();
     const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
@@ -722,6 +761,41 @@ function scheduleAutonomousTasks() {
       actionReason = e.message;
     }
 
+    // Curiosity exploration: explore user-submitted topics when idle or periodically
+    if (action === 'idle' || (cycleCount % 5 === 0 && !actionSuccess)) {
+      const curiosity = getNextCuriosity();
+      if (curiosity) {
+        try {
+          log('info', `Exploring curiosity: "${curiosity.topic.slice(0, 60)}"`);
+          setPhase('curiosity', curiosity.topic.slice(0, 60));
+          const curiosityResult = await runAgentLoop(ollamaClient, curiosity.topic, ROOT, {
+            workLogDir, onLog: log, mode: 'research',
+            visitedUrls: loadVisitedUrls(), recentTopics: [],
+            goalPrompt: config.searchPrompt || ''
+          });
+          if (curiosityResult.visitedUrls && curiosityResult.visitedUrls.length > 0) {
+            addVisitedUrls(curiosityResult.visitedUrls);
+          }
+          const hasData = (curiosityResult.insights && curiosityResult.insights.length > 0) ||
+                          (curiosityResult.summary && curiosityResult.summary.length > 10);
+          if (hasData) {
+            saveKnowledge(researchDbPath, 'curiosity', {
+              topic: curiosity.topic.slice(0, 50),
+              insights: curiosityResult.insights || [],
+              summary: curiosityResult.summary || '',
+              sources: curiosityResult.sources || []
+            });
+            updateGraph(ollamaClient, { topic: curiosity.topic, insights: curiosityResult.insights || [], summary: curiosityResult.summary || '' })
+              .catch(e => log('debug', `Curiosity graph update failed: ${e.message}`));
+          }
+          markCuriosityExplored(curiosity.topic);
+        } catch (e) {
+          log('debug', `Curiosity exploration failed: ${e.message}`);
+          markCuriosityExplored(curiosity.topic);
+        }
+      }
+    }
+
     // Record feedback
     recordOutcome(action, topic || '', actionSuccess, actionReason);
 
@@ -739,6 +813,11 @@ function scheduleAutonomousTasks() {
 
     setPhase('idle');
     return actionResult;
+   } catch (e) {
+    log('error', `Autonomous cycle catastrophic failure: ${e.message}`);
+    setPhase('idle');
+    return { error: e.message };
+   }
   }));
 }
 
@@ -882,6 +961,53 @@ function startServer(port) {
 
         res.end(JSON.stringify({ queued: true, folder: absPath }));
 
+      } else if (method === 'POST' && url.pathname === '/pause') {
+        taskManager.pause();
+        log('info', 'System paused via UI');
+        res.end(JSON.stringify({ ok: true, paused: true }));
+
+      } else if (method === 'POST' && url.pathname === '/resume') {
+        taskManager.resume();
+        log('info', 'System resumed via UI');
+        res.end(JSON.stringify({ ok: true, paused: false }));
+
+      } else if (method === 'POST' && url.pathname === '/inject') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const { topic } = JSON.parse(body);
+        if (!topic) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'topic is required' }));
+          return;
+        }
+        const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
+        taskManager.prioritize(createTask(`inject:research`, async () => {
+          log('info', `Injected research: ${topic.slice(0, 80)}`);
+          setPhase('research', topic.slice(0, 60));
+          const result = await runAgentLoop(ollamaClient, topic, ROOT, {
+            workLogDir, onLog: log, mode: 'research',
+            visitedUrls: loadVisitedUrls(), recentTopics: [],
+            goalPrompt: config.searchPrompt || ''
+          });
+          if (result.visitedUrls && result.visitedUrls.length > 0) {
+            addVisitedUrls(result.visitedUrls);
+          }
+          const hasData = (result.insights && result.insights.length > 0) ||
+                          (result.summary && result.summary.length > 10);
+          if (hasData) {
+            saveKnowledge(path.resolve(ROOT, 'brain', 'research'), 'research', {
+              topic: topic.slice(0, 50),
+              insights: result.insights || [],
+              summary: result.summary || '',
+              sources: result.sources || []
+            });
+          }
+          setPhase('idle');
+          return result;
+        }));
+        log('info', `Research task injected via UI: "${topic.slice(0, 80)}"`);
+        res.end(JSON.stringify({ queued: true, topic }));
+
       } else if (method === 'POST' && url.pathname === '/chat') {
         let body = '';
         for await (const chunk of req) body += chunk;
@@ -920,7 +1046,7 @@ function startServer(port) {
           saveChatMessage('assistant', reply);
 
           // Detect if user message is a research directive and update searchPrompt
-          detectAndUpdateSearchPrompt(ollamaClient, message);
+          detectAndStoreCuriosity(ollamaClient, message);
 
           res.end(JSON.stringify({
             reply,
@@ -1013,6 +1139,53 @@ function startServer(port) {
       } else if (method === 'GET' && url.pathname === '/feedback') {
         const { getStats } = require('./core/feedback-tracker');
         res.end(JSON.stringify(getStats()));
+
+      } else if (method === 'GET' && url.pathname === '/curiosities') {
+        res.end(JSON.stringify(loadCuriosities()));
+
+      } else if (method === 'GET' && url.pathname === '/settings') {
+        // Return current settings (safe subset)
+        const settingsPath = path.join(ROOT, 'config', 'settings.json');
+        try {
+          const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+          res.end(JSON.stringify(settings));
+        } catch (e) {
+          res.end(JSON.stringify({}));
+        }
+
+      } else if (method === 'POST' && url.pathname === '/settings') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const updates = JSON.parse(body);
+        const settingsPath = path.join(ROOT, 'config', 'settings.json');
+        try {
+          const current = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+          // Apply allowed updates
+          if (updates.ollama) {
+            if (!current.ollama) current.ollama = {};
+            if (updates.ollama.url !== undefined) current.ollama.url = updates.ollama.url;
+            if (updates.ollama.model !== undefined) current.ollama.model = updates.ollama.model;
+            if (updates.ollama.dreamModel !== undefined) current.ollama.dreamModel = updates.ollama.dreamModel;
+          }
+          if (updates.searchPrompt !== undefined) current.searchPrompt = updates.searchPrompt;
+          if (updates.taskInterval !== undefined) current.taskInterval = parseInt(updates.taskInterval, 10) || 60000;
+          if (updates.dreamHour !== undefined) current.dreamHour = parseInt(updates.dreamHour, 10) || 5;
+          if (updates.server && updates.server.port !== undefined) {
+            if (!current.server) current.server = {};
+            current.server.port = parseInt(updates.server.port, 10) || 2500;
+          }
+          fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf-8');
+          // Reload config in memory
+          config = Object.assign(config, current);
+          if (ollamaClient && current.ollama) {
+            ollamaClient = new OllamaClient(current.ollama);
+          }
+          log('info', 'Settings updated via UI');
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: e.message }));
+        }
 
       } else {
         res.statusCode = 404;
@@ -1198,6 +1371,13 @@ async function main() {
   process.on('uncaughtException', (err) => {
     log('error', `Uncaught exception: ${err.message}`);
     // Don't exit — try to keep running
+    // Check if task manager is stuck and restart the loop
+    setTimeout(() => {
+      if (!restarting && taskManager.running && !taskManager.currentTask && taskManager.queue.length === 0) {
+        log('info', 'Recovery: restarting autonomous loop after uncaught exception');
+        try { scheduleAutonomousTasks(); } catch {}
+      }
+    }, 5000);
   });
 
   start();

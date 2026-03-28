@@ -39,15 +39,19 @@ function saveFeedback(entries) {
  * @param {string} [reason] - Reason for failure or success details
  */
 function recordOutcome(action, topic, success, reason) {
-  const entries = loadFeedback();
-  entries.push({
-    action,
-    topic: (topic || '').slice(0, 200),
-    success,
-    reason: (reason || '').slice(0, 300),
-    timestamp: new Date().toISOString()
-  });
-  saveFeedback(entries);
+  try {
+    const entries = loadFeedback();
+    entries.push({
+      action,
+      topic: (topic || '').slice(0, 200),
+      success,
+      reason: (reason || '').slice(0, 300),
+      timestamp: new Date().toISOString()
+    });
+    saveFeedback(entries);
+  } catch (e) {
+    // Feedback is non-critical — don't let it break the loop
+  }
 }
 
 /**
@@ -56,7 +60,12 @@ function recordOutcome(action, topic, success, reason) {
  * @returns {{ byAction: Object, recentFailures: Array, successRate: number }}
  */
 function getStats() {
-  const entries = loadFeedback();
+  let entries;
+  try {
+    entries = loadFeedback();
+  } catch (e) {
+    return { byAction: {}, recentFailures: [], successRate: 1.0, totalActions: 0 };
+  }
   if (entries.length === 0) {
     return { byAction: {}, recentFailures: [], successRate: 1.0, totalActions: 0 };
   }

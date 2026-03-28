@@ -332,7 +332,13 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
     keywordPairsNote
   });
 
-  const queryResponse = await client.query(queryPrompt);
+  let queryResponse;
+  try {
+    queryResponse = await client.query(queryPrompt);
+  } catch (e) {
+    onLog('warn', `Query generation LLM call failed: ${e.message}`);
+    queryResponse = { response: '' };
+  }
   const queryText = (queryResponse.response || '').trim();
 
   let queries = [];
@@ -796,7 +802,13 @@ async function summarizeFindings(client, taskDescription, collectedData, onLog) 
 
   onLog('info', `Summarizing ${collectedData.length} sources...`);
 
-  const response = await client.query(prompt);
+  let response;
+  try {
+    response = await client.query(prompt);
+  } catch (e) {
+    onLog('warn', `Summarize LLM call failed: ${e.message}`);
+    return { summary: 'Summary generation failed due to LLM error', insights: [] };
+  }
   const responseText = (response.response || '').trim();
 
   // Try to parse JSON (with or without "action" field)

@@ -60,8 +60,13 @@ async function decomposeGoal(client, goalText, context, options = {}) {
   });
 
   const systemPrompt = loadPrompt('decompose-goal.system');
-  const { parsed } = await client.queryForJson(prompt, systemPrompt, { model: options.model });
-
+  let parsed;
+  try {
+    const result = await client.queryForJson(prompt, systemPrompt, { model: options.model });
+    parsed = result.parsed;
+  } catch (e) {
+    return goals; // Keep existing goals if LLM call fails
+  }
 
   if (!parsed || !Array.isArray(parsed.subtasks)) {
     return goals; // Keep existing if LLM fails
