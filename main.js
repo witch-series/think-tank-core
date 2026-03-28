@@ -369,9 +369,10 @@ function scheduleAutonomousTasks() {
     // Gather current state for LLM
     const recentResearch = getNewKnowledge(researchDbPath, 48);
     const recentTopics = recentResearch.map(e => e.topic).filter(Boolean);
-    const recentInsights = recentResearch.slice(-3).map(e =>
-      `[${e.topic || '?'}] ${(e.insights || []).slice(0, 2).join('; ').slice(0, 150)}`
-    ).join('\n') || 'なし';
+    const recentInsights = recentResearch.slice(-3).map(e => {
+      const ins = Array.isArray(e.insights) ? e.insights : typeof e.insights === 'string' ? [e.insights] : [];
+      return `[${e.topic || '?'}] ${ins.slice(0, 2).join('; ').slice(0, 150)}`;
+    }).join('\n') || 'なし';
 
     const modulesDir = path.resolve(ROOT, 'brain', 'modules');
     let moduleCount = 0;
@@ -867,7 +868,7 @@ function scheduleDream() {
             if (res.accepted) {
               saveKnowledge(dreamResearchDb, 'research', {
                 topic: task.topic,
-                insights: res.insights
+                insights: res.insights || []
               });
               log('info', `Dream knowledge saved: ${task.topic}`);
             }
