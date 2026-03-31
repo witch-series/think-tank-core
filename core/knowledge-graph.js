@@ -233,11 +233,11 @@ async function _updateGraphInner(client, entry) {
     addOrStrengthEdge(normalizeKey(rel.from), normalizeKey(rel.to), rel.relation);
   }
 
-  // Auto-connect: keywords from the same research that have proven value (count >= 2)
+  // Auto-connect: keywords from the same research that have proven value (count >= 3)
   // Only connect established keywords to avoid shielding one-off noise from pruning
   const acceptedKeys = keywords
     .map(kw => normalizeKey(kw.keyword))
-    .filter(k => k && graph.nodes[k] && (graph.nodes[k].count || 1) >= 2);
+    .filter(k => k && graph.nodes[k] && (graph.nodes[k].count || 1) >= 3);
 
   // Limit to top 8 keys to prevent O(n²) edge explosion
   const limitedKeys = acceptedKeys.slice(0, 8);
@@ -1198,8 +1198,11 @@ function autoConnect(onLog) {
   // Build existing edge set for fast lookup
   const edgeSet = new Set(graph.edges.map(e => [e.from, e.to].sort().join('|')));
   let added = 0;
+  // Cap total new edges to prevent edge explosion — max 200 new edges per autoConnect call
+  const MAX_AUTO_EDGES = 200;
 
   function addEdge(fromKey, toKey, relation) {
+    if (added >= MAX_AUTO_EDGES) return false;
     const pairKey = [fromKey, toKey].sort().join('|');
     if (edgeSet.has(pairKey)) return false;
     graph.edges.push({ from: fromKey, to: toKey, relation, weight: 1 });
@@ -1208,11 +1211,12 @@ function autoConnect(onLog) {
     return true;
   }
 
-  // Filter: only connect nodes that have proven value (count >= 2 or importance >= 2)
+  // Filter: only connect nodes that have proven value (count >= 3)
+  // count is the only reliable quality signal — importance is inflated by LLM
   // This prevents low-quality nodes from gaining connections that shield them from pruning
   const qualityKeys = keys.filter(k => {
     const node = graph.nodes[k];
-    return (node.count || 1) >= 2 || (node.importance || 1) >= 2;
+    return (node.count || 1) >= 3;
   });
 
   // --- Strategy 1: Shared topics ---
