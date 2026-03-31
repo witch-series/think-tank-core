@@ -233,15 +233,17 @@ async function _updateGraphInner(client, entry) {
     addOrStrengthEdge(normalizeKey(rel.from), normalizeKey(rel.to), rel.relation);
   }
 
-  // Auto-connect: all keywords extracted from the same research are related
-  // (they co-occurred in the same document/topic)
+  // Auto-connect: keywords from the same research that have proven value (count >= 2)
+  // Only connect established keywords to avoid shielding one-off noise from pruning
   const acceptedKeys = keywords
     .map(kw => normalizeKey(kw.keyword))
-    .filter(k => k && graph.nodes[k]);
+    .filter(k => k && graph.nodes[k] && (graph.nodes[k].count || 1) >= 2);
 
-  for (let i = 0; i < acceptedKeys.length; i++) {
-    for (let j = i + 1; j < acceptedKeys.length; j++) {
-      addOrStrengthEdge(acceptedKeys[i], acceptedKeys[j], `同一リサーチ: ${topic.slice(0, 40)}`);
+  // Limit to top 8 keys to prevent O(n²) edge explosion
+  const limitedKeys = acceptedKeys.slice(0, 8);
+  for (let i = 0; i < limitedKeys.length; i++) {
+    for (let j = i + 1; j < limitedKeys.length; j++) {
+      addOrStrengthEdge(limitedKeys[i], limitedKeys[j], `同一リサーチ: ${topic.slice(0, 40)}`);
     }
   }
 
@@ -894,6 +896,18 @@ async function _pruneGraphInner(client, onLog, options = {}) {
     if (edgeCountsPre[e.to] !== undefined) edgeCountsPre[e.to]++;
   }
 
+  // Count "organic" edges (not auto-generated) per node
+  const AUTO_EDGE_PATTERNS = ['同カテゴリ', '共通トピック', '同一リサーチ'];
+  const organicEdgeCounts = {};
+  for (const k of currentKeys) organicEdgeCounts[k] = 0;
+  for (const e of graph.edges) {
+    const isAuto = AUTO_EDGE_PATTERNS.some(p => (e.relation || '').includes(p));
+    if (!isAuto) {
+      if (organicEdgeCounts[e.from] !== undefined) organicEdgeCounts[e.from]++;
+      if (organicEdgeCounts[e.to] !== undefined) organicEdgeCounts[e.to]++;
+    }
+  }
+
   const now = Date.now();
   const autoRemoveKeys = new Set();
   for (const k of currentKeys) {
@@ -901,6 +915,7 @@ async function _pruneGraphInner(client, onLog, options = {}) {
     if (!node) continue;
     const label = (node.label || k).trim();
     const conn = edgeCountsPre[k] || 0;
+    const organicConn = organicEdgeCounts[k] || 0;
     const count = node.count || 1;
     const ageDays = (now - new Date(node.lastUpdated || node.firstSeen || now).getTime()) / (1000 * 60 * 60 * 24);
 
@@ -914,6 +929,12 @@ async function _pruneGraphInner(client, onLog, options = {}) {
       autoRemoveKeys.add(k);
       continue;
     }
+    // Remove: count=1 nodes with no organic connections (only auto-generated edges)
+    // These are one-off keywords that were never independently confirmed
+    if (count <= 1 && organicConn === 0) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
     // Remove: old stale nodes — low count + few connections + not updated in 30+ days
     if (ageDays > 30 && count <= 2 && conn <= 1) {
       autoRemoveKeys.add(k);
@@ -924,8 +945,8 @@ async function _pruneGraphInner(client, onLog, options = {}) {
       autoRemoveKeys.add(k);
       continue;
     }
-    // Remove: isolated nodes with low importance (never confirmed as valuable)
-    if (conn === 0 && count <= 1 && (node.importance || 1) <= 1) {
+    // Remove: low-count nodes with only weak connections
+    if (count <= 1 && conn <= 2 && (node.importance || 1) <= 1) {
       autoRemoveKeys.add(k);
       continue;
     }
