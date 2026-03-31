@@ -159,8 +159,14 @@ async function _updateGraphInner(client, entry) {
     return graph;
   }
 
+  // Hard cap: LLM sometimes ignores the "3-10 keywords" instruction
+  if (keywords.length > 10) {
+    keywords = keywords.slice(0, 10);
+  }
+
   const now = new Date().toISOString();
   const entrySources = Array.isArray(entry.sources) ? entry.sources : [];
+  let newNodesAdded = 0;
 
   // Update nodes — filter out generic keywords before insertion
   for (const kw of keywords) {
@@ -192,7 +198,8 @@ async function _updateGraphInner(client, entry) {
       if (topic) topicSet.add(topic);
       node.topics = [...topicSet].slice(0, 10);
     } else {
-      // New node
+      // New node — cap at 5 new nodes per entry to control growth
+      if (newNodesAdded >= 5) continue;
       graph.nodes[key] = {
         label: kw.keyword,
         description: kw.description || '',
@@ -204,6 +211,7 @@ async function _updateGraphInner(client, entry) {
         firstSeen: now,
         lastUpdated: now
       };
+      newNodesAdded++;
     }
   }
 

@@ -731,7 +731,10 @@ function scheduleAutonomousTasks() {
           await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
           setPhase('organizing', 'Reviewing knowledge graph');
           await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
-          autoConnect(log);
+          // Only auto-connect if graph is small — large graphs are already well-connected
+const _acStats = getGraphStats();
+if (_acStats.nodeCount <= 500) autoConnect(log);
+else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (threshold: 500)`);
 
           actionSuccess = true;
           actionReason = `compressed ${total.length} files`;
@@ -1231,7 +1234,10 @@ function startServer(port) {
             await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
             setPhase('organizing', 'Reviewing knowledge graph');
             await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
-            autoConnect(log);
+            // Only auto-connect if graph is small — large graphs are already well-connected
+const _acStats = getGraphStats();
+if (_acStats.nodeCount <= 500) autoConnect(log);
+else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (threshold: 500)`);
             log('info', 'Graph reorganization completed');
           } catch (e) {
             log('error', `Graph reorganization failed: ${e.message}`);
@@ -1436,7 +1442,10 @@ function start() {
       log('info', 'Startup graph prune & review...');
       await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
       await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
-      autoConnect(log);
+      // Only auto-connect if graph is small — large graphs are already well-connected
+const _acStats = getGraphStats();
+if (_acStats.nodeCount <= 500) autoConnect(log);
+else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (threshold: 500)`);
     }
   }));
 
