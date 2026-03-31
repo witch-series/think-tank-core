@@ -1,0 +1,19 @@
+Analyze the following JavaScript function.
+
+Function name: {{functionName}}
+Parameters: {{params}}
+File: {{filePath}}
+
+```javascript
+{{functionBody}}
+```
+
+Respond with JSON in this exact format:
+{
+  "purpose": "one sentence description",
+  "inputs": { "paramName": "description" },
+  "returns": "description of return value",
+  "sideEffects": ["effect1", "effect2"],
+  "calls": ["funcName1", "funcName2"],
+  "errorHandling": true
+}

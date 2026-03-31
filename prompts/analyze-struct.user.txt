@@ -1,0 +1,17 @@
+Analyze the structure of this JavaScript module.
+
+File: {{filePath}}
+Lines: {{lineCount}}
+Requires: {{requires}}
+Exports: {{exports}}
+
+Function summaries:
+{{functionSummaries}}
+
+Respond with JSON in this exact format:
+{
+  "role": "one or two sentence description of the module's purpose",
+  "dependencyHealth": "good|warning|critical",
+  "issues": ["issue1", "issue2"],
+  "refactorSuggestions": ["suggestion1", "suggestion2"]
+}

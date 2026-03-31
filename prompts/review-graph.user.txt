@@ -13,18 +13,20 @@
 - 具体的なアルゴリズム名・手法名・ツール名・フレームワーク名・規格名・データセット名
 - その分野の専門家が「固有名詞」として認識する語
 
-削除すべきもの（merge で統合するか無視）:
+以下はすべて削除（remove に追加）:
 - 一般的な単語（予測、最適化、速度、コスト、信頼性、セキュリティ、ロボットなど）
 - 説明的なフレーズ（計算コスト削減、多様な状況下、過剰な滑らかさなど）
 - 分野名そのもの（機械学習、ディープラーニング、コンピュータビジョンなど）
 - 最終目標と無関係なキーワード
+- 曖昧・断片的・意味不明なキーワード
+- 判断に迷ったら削除する（残すより削除を強く優先）
 
 指示:
 - 重複キーワード → merge
-- 上記基準を満たさないキーワード → merge で関連する専門用語に統合するか、不要なら無視
+- 上記基準を満たさないキーワード → remove で削除
 - カテゴリ未設定 → categories で設定（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）
 - 関連あるのに未接続 → addEdges
 - 関連薄い接続 → removeEdges
 
 JSON形式だけで回答:
-{"merge": [{"from": "元", "into": "先"}], "categories": {"名前": "カテゴリ"}, "addEdges": [{"from": "A", "to": "B", "relation": "説明"}], "removeEdges": [{"from": "A", "to": "B"}]}
+{"merge": [{"from": "元", "into": "先"}], "remove": ["不要語1", "不要語2"], "categories": {"名前": "カテゴリ"}, "addEdges": [{"from": "A", "to": "B", "relation": "説明"}], "removeEdges": [{"from": "A", "to": "B"}]}

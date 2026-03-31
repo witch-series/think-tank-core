@@ -13,13 +13,18 @@
 │   ├── goal-manager.js     # ゴール分解エンジン: 目標→サブタスク分解、依存関係管理、進捗追跡
 │   ├── feedback-tracker.js # フィードバック追跡: アクション成功/失敗記録、信頼性評価
 │   ├── knowledge-graph.js  # ナレッジグラフ: キーワード管理、スコア計算、プルーニング
-│   └── task-manager.js     # EventEmitterベースのタスクキュー管理
+│   ├── task-manager.js     # EventEmitterベースのタスクキュー管理
+│   └── analyze/            # JavaScript Analyzer（自律コード解析）
+│       ├── formatter.js           # コードフォーマッター（var→const/let、function→arrow）
+│       ├── unit-analyzer.js       # Unit Analysis（関数単位のLLM解析）
+│       ├── structural-analyzer.js # Structural Analysis（ファイル単位の構造解析）
+│       └── analyze-loop.js        # 自律ループ（監視・キュー・日次学習データ生成）
 ├── explorers/
 │   ├── crawler.js          # HTTPフェッチ（リダイレクト追従対応）+ Ollama連携で4項目抽出
 │   ├── searcher.js         # Web検索エンジン（Brave/DuckDuckGo/arxiv）
 │   └── verifier.js         # 2重チェック: 別コンテキストでの批判的検証
 ├── lib/
-│   ├── analyzer.js         # 再帰的ファイルスキャン + 関数抽出 + .summary.json 生成
+│   ├── analyzer.js         # 再帰的ファイルスキャン + 関数抽出 + .summary.md 生成
 │   ├── cli.js              # インタラクティブCLIインターフェース
 │   ├── configurator.js     # 設定読み込み + コードセキュリティ検閲
 │   ├── ollama-client.js    # Ollamaクライアント（マルチURLフェイルオーバー、2モデル対応）
@@ -61,6 +66,10 @@
 │   ├── goals.json          # ゴール分解結果（サブタスク・進捗）
 │   ├── feedback.json       # アクション実績（成功/失敗記録）
 │   └── chat-history.json   # チャット履歴
+├── analyze-result/         # 解析出力ディレクトリ（自動生成、gitignore対象）
+│   ├── core/               # core/ ファイルの .summary.md
+│   ├── lib/                # lib/ ファイルの .summary.md
+│   └── repair-list.json    # 修復対象ファイルリスト
 ├── scripts/
 │   └── reset.js            # brain/ データの全削除
 ├── ui/

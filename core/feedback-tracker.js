@@ -10,7 +10,7 @@ const MAX_ENTRIES = 200;
  * Load feedback history from disk.
  * @returns {Array<{action: string, topic: string, success: boolean, reason?: string, timestamp: string}>}
  */
-function loadFeedback() {
+const loadFeedback = () => {
   try {
     if (fs.existsSync(FEEDBACK_PATH)) {
       return JSON.parse(fs.readFileSync(FEEDBACK_PATH, 'utf-8'));
@@ -22,7 +22,7 @@ function loadFeedback() {
 /**
  * Save feedback history to disk.
  */
-function saveFeedback(entries) {
+const saveFeedback = (entries) => {
   const dir = path.dirname(FEEDBACK_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   // Keep only recent entries
@@ -38,7 +38,7 @@ function saveFeedback(entries) {
  * @param {boolean} success - Whether the action succeeded
  * @param {string} [reason] - Reason for failure or success details
  */
-function recordOutcome(action, topic, success, reason) {
+const recordOutcome = (action, topic, success, reason) => {
   try {
     const entries = loadFeedback();
     entries.push({
@@ -59,7 +59,7 @@ function recordOutcome(action, topic, success, reason) {
  *
  * @returns {{ byAction: Object, recentFailures: Array, successRate: number }}
  */
-function getStats() {
+const getStats = () => {
   let entries;
   try {
     entries = loadFeedback();
@@ -100,7 +100,7 @@ function getStats() {
 /**
  * Get a summary string suitable for including in LLM prompts.
  */
-function getFeedbackSummary() {
+const getFeedbackSummary = () => {
   const stats = getStats();
   if (stats.totalActions === 0) return '';
 
@@ -129,7 +129,7 @@ function getFeedbackSummary() {
  * @param {number} [recentN=5] - How many recent attempts to consider
  * @returns {boolean}
  */
-function isActionUnreliable(action, recentN = 5) {
+const isActionUnreliable = (action, recentN = 5) => {
   const entries = loadFeedback().filter(e => e.action === action);
   if (entries.length < 3) return false; // not enough data
 

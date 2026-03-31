@@ -6,14 +6,14 @@ const { URL } = require('url');
 /**
  * Wait for specified milliseconds
  */
-function wait(ms) {
+const wait = (ms) => {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
  * Decode HTML entities in text
  */
-function decodeEntities(text) {
+const decodeEntities = (text) => {
   return text
     .replace(/&#x27;/g, "'")
     .replace(/&#39;/g, "'")
@@ -175,7 +175,7 @@ async function searchDDG(query, maxResults = 5) {
  * @param {string} url - The URL to classify
  * @returns {{type: string, credibility: number}}
  */
-function classifySource(url) {
+const classifySource = (url) => {
   const lower = url.toLowerCase();
 
   // Tier 1: Academic papers & preprints (credibility 1.0)
@@ -300,7 +300,7 @@ async function searchGitHub(query, maxResults = 5) {
  * @param {number} maxResults - Maximum number of results
  * @returns {Promise<Array<{url: string, title: string, snippet: string, credibility: number}>>}
  */
-async function searchWeb(query, maxResults = 5) {
+const searchWeb = async (query, maxResults = 5) => {
   // Try Brave first
   let results = await searchBrave(query, maxResults);
   if (results.length === 0) {
@@ -318,7 +318,7 @@ async function searchWeb(query, maxResults = 5) {
 /**
  * Fetch a web page and extract readable text content
  */
-async function fetchPage(pageUrl, maxLength = 6000) {
+const fetchPage = async (pageUrl, maxLength = 6000) => {
   try {
     const res = await fetch(pageUrl, {
       headers: {
@@ -360,7 +360,7 @@ async function fetchPage(pageUrl, maxLength = 6000) {
  * @param {number} maxResults - Maximum number of results
  * @returns {Promise<Array<{title: string, summary: string, url: string, authors: string[], published: string}>>}
  */
-async function searchArxiv(query, maxResults = 5) {
+const searchArxiv = async (query, maxResults = 5) => {
   const searchUrl = `http://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=${maxResults}&sortBy=submittedDate&sortOrder=descending`;
 
   try {

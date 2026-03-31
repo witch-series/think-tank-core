@@ -6,7 +6,7 @@ const { parseJsonSafe } = require('../lib/json-parser');
 /**
  * @param {import('../lib/ollama-client').OllamaClient} client
  */
-async function verify(client, originalInsights, sourceText) {
+const verify = async (client, originalInsights, sourceText) => {
   const prompt = fillPrompt('verify.user', {
     sourceText,
     insights: JSON.stringify(originalInsights, null, 2)
@@ -29,7 +29,7 @@ async function verify(client, originalInsights, sourceText) {
 /**
  * @param {import('../lib/ollama-client').OllamaClient} client
  */
-async function extractInsights(client, sourceText, systemPrompt) {
+const extractInsights = async (client, sourceText, systemPrompt) => {
   const prompt = fillPrompt('extract-insights.user', { sourceText });
 
   const response = await client.query(prompt, systemPrompt);
@@ -49,7 +49,7 @@ async function extractInsights(client, sourceText, systemPrompt) {
 /**
  * @param {import('../lib/ollama-client').OllamaClient} client
  */
-async function doubleCheck(client, sourceText) {
+const doubleCheck = async (client, sourceText) => {
   const insights = await extractInsights(client, sourceText);
   const verification = await verify(client, insights, sourceText);
 

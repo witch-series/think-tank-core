@@ -11,7 +11,7 @@ const { parseJsonSafe } = require('../lib/json-parser');
 
 // --- Git helpers ---
 
-function getRecentCommits(repoPath, hours = 24) {
+const getRecentCommits = (repoPath, hours = 24) => {
   return new Promise((resolve) => {
     const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
     execFile('git', ['log', `--since=${since}`, '--pretty=format:%H|%s|%ai', '--diff-filter=M'], {
@@ -27,7 +27,7 @@ function getRecentCommits(repoPath, hours = 24) {
   });
 }
 
-function getLastCommit(repoPath) {
+const getLastCommit = (repoPath) => {
   return new Promise((resolve) => {
     execFile('git', ['log', '-1', '--pretty=format:%H|%s|%ai'], {
       cwd: repoPath
@@ -39,7 +39,7 @@ function getLastCommit(repoPath) {
   });
 }
 
-function getDiff(repoPath, commitHash) {
+const getDiff = (repoPath, commitHash) => {
   return new Promise((resolve) => {
     execFile('git', ['diff', `${commitHash}~1`, commitHash], {
       cwd: repoPath, maxBuffer: 1024 * 1024 * 5
@@ -59,7 +59,7 @@ const SENSITIVE_PATTERNS = [
   /token\s*[:=]\s*['"][^'"]+['"]/i,               // tokens
 ];
 
-function containsSensitiveData(text) {
+const containsSensitiveData = (text) => {
   const issues = [];
   for (const pattern of SENSITIVE_PATTERNS) {
     const match = text.match(pattern);
@@ -70,7 +70,7 @@ function containsSensitiveData(text) {
   return issues;
 }
 
-function autoCommit(repoPath, message, allowedPaths) {
+const autoCommit = (repoPath, message, allowedPaths) => {
   return new Promise((resolve) => {
     // Stage only specific paths instead of -A to prevent leaking config files
     const paths = allowedPaths || ['brain/modules'];
@@ -113,7 +113,7 @@ function autoCommit(repoPath, message, allowedPaths) {
   });
 }
 
-function sanitizeText(text) {
+const sanitizeText = (text) => {
   // Remove IP addresses
   let safe = text.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b/g, '[REDACTED]');
   // Remove potential secrets
@@ -123,7 +123,7 @@ function sanitizeText(text) {
 
 // --- Knowledge helpers ---
 
-function getNewKnowledge(knowledgeDbPath, hours = 24) {
+const getNewKnowledge = (knowledgeDbPath, hours = 24) => {
   const since = Date.now() - hours * 60 * 60 * 1000;
   const entries = [];
 
@@ -147,7 +147,7 @@ function getNewKnowledge(knowledgeDbPath, hours = 24) {
 /**
  * Get all knowledge entries from a directory (no time filter).
  */
-function getAllKnowledge(knowledgeDbPath) {
+const getAllKnowledge = (knowledgeDbPath) => {
   const entries = [];
   let files;
   try { files = fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
@@ -166,7 +166,7 @@ function getAllKnowledge(knowledgeDbPath) {
   return entries;
 }
 
-function saveKnowledge(knowledgeDbPath, category, data) {
+const saveKnowledge = (knowledgeDbPath, category, data) => {
   if (!fs.existsSync(knowledgeDbPath)) fs.mkdirSync(knowledgeDbPath, { recursive: true });
   const filePath = path.join(knowledgeDbPath, `${category}.jsonl`);
   const entry = { ...data, timestamp: new Date().toISOString() };
@@ -180,7 +180,7 @@ function saveKnowledge(knowledgeDbPath, category, data) {
 
 const COMPRESS_THRESHOLD = 20; // Compress when entries exceed this count
 
-async function compressKnowledge(client, knowledgeDbPath) {
+const compressKnowledge = async (client, knowledgeDbPath) => {
   let files;
   try { files = fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
   catch { return { skipped: true }; }
@@ -229,7 +229,7 @@ async function compressKnowledge(client, knowledgeDbPath) {
 
 // --- Dream Phase ---
 
-async function dreamPhase(client, config, repoPath) {
+const dreamPhase = async (client, config, repoPath) => {
   const commits = await getRecentCommits(repoPath);
   const researchKnowledge = getNewKnowledge(path.resolve(repoPath, 'brain', 'research'));
   const analysisKnowledge = getNewKnowledge(path.resolve(repoPath, 'brain', 'analysis'));
@@ -261,7 +261,7 @@ async function dreamPhase(client, config, repoPath) {
 
 // --- Refactoring ---
 
-async function proposeRefactor(client, filePath) {
+const proposeRefactor = async (client, filePath) => {
   const code = fs.readFileSync(filePath, 'utf-8');
   const validation = validateCode(code);
 
@@ -304,7 +304,7 @@ async function proposeRefactor(client, filePath) {
   return { suggestions: result.suggestions || [], applied: false, reason: result.reason || 'No code changes proposed' };
 }
 
-async function applyRefactor(repoPath, filePath, refactoredCode, allowedPaths) {
+const applyRefactor = async (repoPath, filePath, refactoredCode, allowedPaths) => {
   // Safety: only allow editing files within explicitly allowed paths (targetFolders)
   const relPath = path.relative(repoPath, filePath);
   const allowed = (allowedPaths || ['brain/modules']).map(p => p.replace(/^\.\//, ''));
@@ -337,7 +337,7 @@ async function applyRefactor(repoPath, filePath, refactoredCode, allowedPaths) {
 
 // --- Code generation from knowledge ---
 
-async function generateModule(client, topic, knowledge, modulesDir) {
+const generateModule = async (client, topic, knowledge, modulesDir) => {
   const prompt = fillPrompt('generate-module.user', {
     topic,
     knowledge: JSON.stringify(knowledge, null, 2)
@@ -419,7 +419,7 @@ async function generateModule(client, topic, knowledge, modulesDir) {
 
 // --- Chat with LLM ---
 
-async function chat(client, userMessage, context) {
+const chat = async (client, userMessage, context) => {
   const systemPrompt = context?.systemPrompt || loadPrompt('chat.system');
 
   const parts = [];
@@ -433,13 +433,13 @@ async function chat(client, userMessage, context) {
 
   const prompt = parts.join('\n\n');
 
-  const response = await client.query(prompt, systemPrompt);
+  const response = await client.query(prompt, systemPrompt, { priority: true });
   return response.response;
 }
 
 // --- Script review and cleanup ---
 
-async function reviewScripts(client, modulesDir) {
+const reviewScripts = async (client, modulesDir) => {
   if (!fs.existsSync(modulesDir)) return { reviewed: 0, deleted: 0 };
 
   const files = fs.readdirSync(modulesDir).filter(f => f.endsWith('.js'));
@@ -488,8 +488,8 @@ async function reviewScripts(client, modulesDir) {
         const filePath = path.join(modulesDir, review.file);
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
-          // Also remove .summary.json if it exists
-          const summaryPath = filePath.replace(/\.js$/, '.summary.json');
+          // Also remove .summary.md if it exists
+          const summaryPath = filePath.replace(/\.js$/, '.summary.md');
           if (fs.existsSync(summaryPath)) fs.unlinkSync(summaryPath);
           deleted++;
         }

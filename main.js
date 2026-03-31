@@ -26,6 +26,8 @@ const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderE
 const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
 const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
+const { AnalyzeLoop } = require('./core/analyze/analyze-loop');
+const { parseSummaryMarkdown } = require('./core/analyze/structural-analyzer');
 
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config', 'settings.json');
@@ -96,13 +98,25 @@ function loadChatHistory() {
   return [];
 }
 
+let _chatWriting = false;
+
 function saveChatMessage(role, text) {
-  const history = loadChatHistory();
-  history.push({ role, text, timestamp: new Date().toISOString() });
-  while (history.length > MAX_CHAT_HISTORY) history.shift();
-  const dir = path.dirname(CHAT_HISTORY_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(CHAT_HISTORY_PATH, JSON.stringify(history), 'utf-8');
+  // Simple guard to prevent interleaved reads/writes
+  if (_chatWriting) {
+    setTimeout(() => saveChatMessage(role, text), 50);
+    return;
+  }
+  _chatWriting = true;
+  try {
+    const history = loadChatHistory();
+    history.push({ role, text, timestamp: new Date().toISOString() });
+    while (history.length > MAX_CHAT_HISTORY) history.shift();
+    const dir = path.dirname(CHAT_HISTORY_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CHAT_HISTORY_PATH, JSON.stringify(history), 'utf-8');
+  } finally {
+    _chatWriting = false;
+  }
 }
 
 // --- Curiosity System ---
@@ -154,6 +168,7 @@ let ollamaClient = null;
 let httpServer = null;
 let dreamTimer = null;
 let restarting = false;
+let analyzeLoop = null;
 
 // --- Task Manager ---
 const taskManager = new TaskManager();
@@ -164,7 +179,6 @@ taskManager.on('task:error', ({ task, error }) => log('error', `Task failed: ${t
 
 taskManager.on('idle', () => {
   if (restarting) return;
-  // Directly enqueue the next cycle — no timers, no delays
   try {
     scheduleAutonomousTasks();
   } catch (e) {
@@ -181,31 +195,103 @@ taskManager.on('idle', () => {
   }
 });
 
-// --- Helper: visited URL tracking ---
+// --- Watchdog: detect and recover from stalled loops ---
+const WATCHDOG_INTERVAL = 120000; // check every 2 minutes
+const WATCHDOG_STALL_THRESHOLD = 600000; // 10 minutes with no activity = stalled
+
+setInterval(() => {
+  if (restarting || taskManager.paused) return;
+
+  const now = Date.now();
+  const lastActivity = taskManager.lastActivityTime || now;
+  const elapsed = now - lastActivity;
+  const hasWork = taskManager.currentTask || taskManager.queue.length > 0;
+
+  // Case 1: No current task and empty queue — loop died
+  if (!taskManager.currentTask && taskManager.queue.length === 0 && taskManager.running) {
+    log('warn', `Watchdog: loop idle with empty queue (last activity ${Math.round(elapsed / 1000)}s ago). Re-seeding...`);
+    try { scheduleAutonomousTasks(); } catch (e) {
+      log('error', `Watchdog re-seed failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // Case 2: A task has been running for too long (stuck)
+  if (taskManager.currentTask && elapsed > WATCHDOG_STALL_THRESHOLD) {
+    log('warn', `Watchdog: task '${taskManager.currentTask.name}' appears stalled (${Math.round(elapsed / 1000)}s). Force-cycling...`);
+    // Force clear and re-seed
+    taskManager.currentTask = null;
+    taskManager.queue = [];
+    try { scheduleAutonomousTasks(); } catch (e) {
+      log('error', `Watchdog force-cycle failed: ${e.message}`);
+    }
+  }
+}, WATCHDOG_INTERVAL);
+
+// --- Helper: visited URL tracking (with quality metadata) ---
 const VISITED_URLS_PATH = path.join(ROOT, 'brain', 'visited-urls.json');
 
-function loadVisitedUrls() {
+function loadVisitedUrlsRaw() {
   try {
     if (fs.existsSync(VISITED_URLS_PATH)) {
-      return JSON.parse(fs.readFileSync(VISITED_URLS_PATH, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(VISITED_URLS_PATH, 'utf-8'));
+      // Support migration from old format (plain array of strings)
+      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+        return data.map(url => ({ url, credibility: 0.5, visitedAt: new Date().toISOString() }));
+      }
+      return Array.isArray(data) ? data : [];
     }
   } catch {}
   return [];
 }
 
-function saveVisitedUrls(urls) {
-  const dir = path.dirname(VISITED_URLS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(VISITED_URLS_PATH, JSON.stringify(urls, null, 2), 'utf-8');
+function loadVisitedUrls() {
+  return loadVisitedUrlsRaw().map(e => typeof e === 'string' ? e : e.url);
 }
 
-function addVisitedUrls(newUrls) {
-  const existing = loadVisitedUrls();
-  const set = new Set(existing);
+function saveVisitedUrlsRaw(entries) {
+  const dir = path.dirname(VISITED_URLS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(VISITED_URLS_PATH, JSON.stringify(entries, null, 2), 'utf-8');
+}
+
+function addVisitedUrls(newUrls, credibilityMap) {
+  const existing = loadVisitedUrlsRaw();
+  const urlIndex = new Map(existing.map(e => [e.url, e]));
+  const now = new Date().toISOString();
+
   for (const url of newUrls) {
-    if (url && typeof url === 'string') set.add(url);
+    if (!url || typeof url !== 'string') continue;
+    if (!urlIndex.has(url)) {
+      urlIndex.set(url, {
+        url,
+        credibility: (credibilityMap && credibilityMap[url]) || 0.5,
+        visitedAt: now
+      });
+    }
   }
-  saveVisitedUrls([...set]);
+
+  saveVisitedUrlsRaw([...urlIndex.values()]);
+}
+
+// Periodic cleanup: remove low-quality URLs older than 30 days, keep high-quality ones
+function cleanupVisitedUrls() {
+  const entries = loadVisitedUrlsRaw();
+  if (entries.length < 1000) return; // no need to clean small lists
+
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const cleaned = entries.filter(e => {
+    const age = new Date(e.visitedAt || 0).getTime();
+    // Keep: high-credibility (>= 0.7), or recent (< 30 days), or unknown age
+    if ((e.credibility || 0.5) >= 0.7) return true;
+    if (!e.visitedAt) return true;
+    return age > thirtyDaysAgo;
+  });
+
+  if (cleaned.length < entries.length) {
+    log('info', `URL cleanup: removed ${entries.length - cleaned.length} low-quality old URLs (${cleaned.length} remaining)`);
+    saveVisitedUrlsRaw(cleaned);
+  }
 }
 
 // --- Helper: detect research intent from user chat and store as curiosity ---
@@ -258,7 +344,7 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
       });
 
       if (result.visitedUrls && result.visitedUrls.length > 0) {
-        addVisitedUrls(result.visitedUrls);
+        addVisitedUrls(result.visitedUrls, result.credibilityMap);
       }
 
       if (result.empty) return;
@@ -286,6 +372,8 @@ function collectContext() {
   const folders = config.targetFolders || [];
   let fileCount = 0;
   const functionNames = [];
+  let analyzerIssues = 0;
+  let analyzerSuggestions = 0;
 
   for (const folder of folders) {
     const absPath = path.resolve(ROOT, folder);
@@ -293,13 +381,24 @@ function collectContext() {
     fileCount += files.length;
 
     for (const file of files) {
-      const summaryPath = file.replace(/\.js$/, '.summary.json');
+      // Check new analyze-result/ directory first, then fall back to old .summary.md beside source
+      const relative = path.relative(ROOT, file);
+      const newSummaryPath = path.join(ROOT, 'analyze-result', relative.replace(/\.js$/, '.summary.md'));
+      const oldSummaryPath = file.replace(/\.js$/, '.summary.md');
+      const summaryPath = fs.existsSync(newSummaryPath) ? newSummaryPath : oldSummaryPath;
+
       if (fs.existsSync(summaryPath)) {
         try {
-          const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf-8'));
+          const mdContent = fs.readFileSync(summaryPath, 'utf-8');
+          const summary = summaryPath.endsWith('.md') ? parseSummaryMarkdown(mdContent) : JSON.parse(mdContent);
+          if (!summary) throw new Error('parse failed');
           for (const fn of summary.functions || []) {
-            functionNames.push(`${path.basename(file)}:${fn.name}`);
+            const desc = fn.purpose ? ` (${fn.purpose.slice(0, 40)})` : '';
+            functionNames.push(`${path.basename(file)}:${fn.name}${desc}`);
           }
+          // Count structural issues for context
+          analyzerIssues += (summary.structure?.issues || []).length;
+          analyzerSuggestions += (summary.structure?.refactorSuggestions || []).length;
         } catch {}
       }
     }
@@ -321,7 +420,9 @@ function collectContext() {
     fileCount,
     knowledgeCount,
     recentActivity: recentLogs || 'システム起動直後',
-    functionList: functionNames.slice(0, 50).join(', ') || 'なし'
+    functionList: functionNames.slice(0, 50).join(', ') || 'なし',
+    analyzerIssues,
+    analyzerSuggestions
   };
 }
 
@@ -383,7 +484,7 @@ function scheduleAutonomousTasks() {
     const graphStats = getGraphStats(recentTopics);
 
     // Goal decomposition: break goal into subtasks if needed
-    const goalText = config.searchPrompt || '';
+    const goalText = config.finalGoal || config.searchPrompt || '';
     let goalSummary = null;
     let nextSubtaskInfo = 'なし';
     let currentSubtask = null;
@@ -395,11 +496,11 @@ function scheduleAutonomousTasks() {
           moduleCount,
           graphNodeCount: graphStats.nodeCount,
           existingFiles: context.functionList
-        }, { goalPrompt: config.searchPrompt });
+        }, { goalPrompt: goalText });
 
         // Periodically re-evaluate goal progress
         if (cycleCount % 5 === 0) {
-          await evaluateProgress(ollamaClient, { goalPrompt: config.searchPrompt });
+          await evaluateProgress(ollamaClient, { goalPrompt: goalText });
         }
 
         goalSummary = getGoalSummary();
@@ -481,8 +582,9 @@ function scheduleAutonomousTasks() {
         });
         if (filtered.length > 0) {
           const pick = filtered[Math.floor(Math.random() * Math.min(filtered.length, 5))];
-          const goalSuffix = config.searchPrompt && config.searchPrompt !== 'なし'
-            ? ` と ${config.searchPrompt.slice(0, 30)} の関連性`
+          const goalRef = config.finalGoal || config.searchPrompt || '';
+          const goalSuffix = goalRef && goalRef !== 'なし'
+            ? ` と ${goalRef.slice(0, 30)} の関連性`
             : ' の最新動向';
           log('info', `Topic diversity: "${topic}" is repetitive, switching to "${pick.label}"`);
           topic = pick.label + goalSuffix;
@@ -521,12 +623,12 @@ function scheduleAutonomousTasks() {
           const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
             workLogDir, onLog: log, mode: 'research',
             visitedUrls, recentTopics,
-            goalPrompt: config.searchPrompt || '',
+            goalPrompt: config.finalGoal || config.searchPrompt || '',
             searchPairs
           });
 
           if (result.visitedUrls && result.visitedUrls.length > 0) {
-            addVisitedUrls(result.visitedUrls);
+            addVisitedUrls(result.visitedUrls, result.credibilityMap);
           }
 
           if (result.empty) {
@@ -553,7 +655,7 @@ function scheduleAutonomousTasks() {
             actionReason = `${(result.insights || []).length} insights`;
 
             updateGraph(ollamaClient, entry).catch(e =>
-              log('debug', `Graph update failed: ${e.message}`)
+              log('warn', `Graph update failed: ${e.message}`)
             );
 
             // Strengthen connections between keyword pairs that were searched together
@@ -643,9 +745,9 @@ function scheduleAutonomousTasks() {
           }
 
           setPhase('organizing', 'Pruning knowledge graph');
-          await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+          await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
           setPhase('organizing', 'Reviewing knowledge graph');
-          await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+          await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
           autoConnect(log);
 
           actionSuccess = true;
@@ -693,25 +795,49 @@ function scheduleAutonomousTasks() {
           lastAnalysisCycle = cycleCount;
           setPhase('analyzing', 'Codebase analysis');
           log('info', 'Analyzing codebase...');
-          const result = await runAgentLoop(ollamaClient,
-            'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
-            workLogDir, onLog: log, mode: 'analyze', targetFolders: folders
-          });
 
-          const hasData = (result.insights && result.insights.length > 0) ||
-                          (result.summary && result.summary.length > 10);
-          if (hasData) {
-            saveKnowledge(analysisDbPath, 'analysis', {
-              topic: 'コードベース解析',
-              insights: result.insights || [],
-              summary: result.summary || '',
-              sources: result.sources || []
-            });
-            log('info', `Analysis saved: ${(result.insights || []).length} findings`);
+          // Use the new AnalyzeLoop to queue all target files
+          if (analyzeLoop) {
+            const filesToAnalyze = [];
+            for (const folder of folders) {
+              filesToAnalyze.push(...scanDirectory(path.resolve(ROOT, folder), '.js'));
+            }
+            // Also include core system files
+            for (const sysFolder of ['core', 'lib', 'explorers']) {
+              const sysPath = path.resolve(ROOT, sysFolder);
+              if (fs.existsSync(sysPath)) {
+                for (const f of scanDirectory(sysPath, '.js')) {
+                  if (!filesToAnalyze.includes(f)) filesToAnalyze.push(f);
+                }
+              }
+            }
+            for (const f of filesToAnalyze) analyzeLoop._enqueue(f);
+            log('info', `Queued ${filesToAnalyze.length} files for analysis`);
             actionSuccess = true;
-            actionReason = `${(result.insights || []).length} findings`;
+            actionReason = `${filesToAnalyze.length} files queued`;
+            actionResult = { filesQueued: filesToAnalyze.length };
+          } else {
+            // Fallback to old agent-based analysis
+            const result = await runAgentLoop(ollamaClient,
+              'プロジェクトのコードベースを解析し、品質・構造・改善点を分析してください。', ROOT, {
+              workLogDir, onLog: log, mode: 'analyze', targetFolders: folders
+            });
+
+            const hasData = (result.insights && result.insights.length > 0) ||
+                            (result.summary && result.summary.length > 10);
+            if (hasData) {
+              saveKnowledge(analysisDbPath, 'analysis', {
+                topic: 'コードベース解析',
+                insights: result.insights || [],
+                summary: result.summary || '',
+                sources: result.sources || []
+              });
+              log('info', `Analysis saved: ${(result.insights || []).length} findings`);
+              actionSuccess = true;
+              actionReason = `${(result.insights || []).length} findings`;
+            }
+            actionResult = result;
           }
-          actionResult = result;
           break;
         }
 
@@ -772,10 +898,10 @@ function scheduleAutonomousTasks() {
           const curiosityResult = await runAgentLoop(ollamaClient, curiosity.topic, ROOT, {
             workLogDir, onLog: log, mode: 'research',
             visitedUrls: loadVisitedUrls(), recentTopics: [],
-            goalPrompt: config.searchPrompt || ''
+            goalPrompt: config.finalGoal || config.searchPrompt || ''
           });
           if (curiosityResult.visitedUrls && curiosityResult.visitedUrls.length > 0) {
-            addVisitedUrls(curiosityResult.visitedUrls);
+            addVisitedUrls(curiosityResult.visitedUrls, curiosityResult.credibilityMap);
           }
           const hasData = (curiosityResult.insights && curiosityResult.insights.length > 0) ||
                           (curiosityResult.summary && curiosityResult.summary.length > 10);
@@ -787,7 +913,7 @@ function scheduleAutonomousTasks() {
               sources: curiosityResult.sources || []
             });
             updateGraph(ollamaClient, { topic: curiosity.topic, insights: curiosityResult.insights || [], summary: curiosityResult.summary || '' })
-              .catch(e => log('debug', `Curiosity graph update failed: ${e.message}`));
+              .catch(e => log('warn', `Curiosity graph update failed: ${e.message}`));
           }
           markCuriosityExplored(curiosity.topic);
         } catch (e) {
@@ -834,6 +960,9 @@ function scheduleDream() {
   log('info', `Dream phase scheduled at ${next.toISOString()} (in ${Math.round(delay / 60000)} min)`);
 
   dreamTimer = setTimeout(async () => {
+    // Daily maintenance: clean up low-quality old URLs
+    try { cleanupVisitedUrls(); } catch (e) { log('debug', `URL cleanup failed: ${e.message}`); }
+
     log('info', 'Dream phase starting');
     taskManager.prioritize(createTask('dream:phase', async () => {
       const result = await dreamPhase(ollamaClient, config, ROOT);
@@ -930,6 +1059,7 @@ function startServer(port) {
         res.end(JSON.stringify({
           taskManager: taskManager.getStatus(),
           ollama: ollamaClient ? ollamaClient.getStatus() : null,
+          analyzer: analyzeLoop ? analyzeLoop.getStatus() : null,
           knowledge: knowledgeStats,
           lastCommit,
           activity: activityPhase,
@@ -956,11 +1086,18 @@ function startServer(port) {
         }
 
         const absPath = path.resolve(ROOT, folder);
-        taskManager.prioritize(createTask(`manual:analyze:${folder}`, async () => {
-          return analyzeFolderWithLLM(ollamaClient, absPath);
-        }));
-
-        res.end(JSON.stringify({ queued: true, folder: absPath }));
+        // Queue files from the folder into the AnalyzeLoop
+        if (analyzeLoop) {
+          const filesToAnalyze = scanDirectory(absPath, '.js');
+          for (const f of filesToAnalyze) analyzeLoop._enqueue(f);
+          res.end(JSON.stringify({ queued: true, folder: absPath, files: filesToAnalyze.length }));
+        } else {
+          // Fallback to old system if analyze loop not running
+          taskManager.prioritize(createTask(`manual:analyze:${folder}`, async () => {
+            return analyzeFolderWithLLM(ollamaClient, absPath);
+          }));
+          res.end(JSON.stringify({ queued: true, folder: absPath }));
+        }
 
       } else if (method === 'POST' && url.pathname === '/pause') {
         taskManager.pause();
@@ -988,10 +1125,10 @@ function startServer(port) {
           const result = await runAgentLoop(ollamaClient, topic, ROOT, {
             workLogDir, onLog: log, mode: 'research',
             visitedUrls: loadVisitedUrls(), recentTopics: [],
-            goalPrompt: config.searchPrompt || ''
+            goalPrompt: config.finalGoal || config.searchPrompt || ''
           });
           if (result.visitedUrls && result.visitedUrls.length > 0) {
-            addVisitedUrls(result.visitedUrls);
+            addVisitedUrls(result.visitedUrls, result.credibilityMap);
           }
           const hasData = (result.insights && result.insights.length > 0) ||
                           (result.summary && result.summary.length > 10);
@@ -1096,16 +1233,21 @@ function startServer(port) {
         res.end(JSON.stringify(getGraphData()));
 
       } else if (method === 'POST' && url.pathname === '/knowledge-graph/reorganize') {
-        // Run reorganization directly (not queued) so we can return the result
+        // Prevent duplicate reorganization
+        const isReorgRunning = taskManager.currentTask?.name === 'manual:graph-reorg' ||
+          taskManager.queue.some(t => t.name === 'manual:graph-reorg');
+        if (isReorgRunning) {
+          res.end(JSON.stringify({ started: false, reason: 'already running' }));
+          return;
+        }
         res.end(JSON.stringify({ started: true }));
-        // Execute as a prioritized task
         taskManager.prioritize(createTask('manual:graph-reorg', async () => {
           try {
             setPhase('organizing', 'Pruning knowledge graph');
             log('info', 'Graph reorganization started');
-            await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+            await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
             setPhase('organizing', 'Reviewing knowledge graph');
-            await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+            await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
             autoConnect(log);
             log('info', 'Graph reorganization completed');
           } catch (e) {
@@ -1169,11 +1311,15 @@ function startServer(port) {
             if (updates.ollama.dreamModel !== undefined) current.ollama.dreamModel = updates.ollama.dreamModel;
           }
           if (updates.searchPrompt !== undefined) current.searchPrompt = updates.searchPrompt;
+          // finalGoal is protected — only changeable via setup (npm run setup)
           if (updates.taskInterval !== undefined) current.taskInterval = parseInt(updates.taskInterval, 10) || 60000;
           if (updates.dreamHour !== undefined) current.dreamHour = parseInt(updates.dreamHour, 10) || 5;
           if (updates.server && updates.server.port !== undefined) {
             if (!current.server) current.server = {};
             current.server.port = parseInt(updates.server.port, 10) || 2500;
+          }
+          if (updates.voice) {
+            current.voice = Object.assign(current.voice || {}, updates.voice);
           }
           fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf-8');
           // Reload config in memory
@@ -1193,8 +1339,11 @@ function startServer(port) {
         res.end(JSON.stringify({ error: 'Not found' }));
       }
     } catch (err) {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: err.message }));
+      log('error', `API error: ${req.method} ${req.url} — ${err.message}`);
+      if (!res.writableEnded) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: err.message }));
+      }
     }
   });
 
@@ -1219,6 +1368,7 @@ function shutdown() {
     restarting = true;
     taskManager.stop();
 
+    if (analyzeLoop) { analyzeLoop.stop(); analyzeLoop = null; }
     if (dreamTimer) { clearTimeout(dreamTimer); dreamTimer = null; }
 
     if (httpServer) {
@@ -1301,8 +1451,8 @@ function start() {
     const count = await processUnindexedEntries(ollamaClient, [researchDir, analysisDir], log);
     if (count > 0) {
       log('info', 'Startup graph prune & review...');
-      await pruneGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
-      await reviewGraph(ollamaClient, log, { goalPrompt: config.searchPrompt });
+      await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
+      await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
       autoConnect(log);
     }
   }));
@@ -1313,6 +1463,23 @@ function start() {
   // Start API server
   const port = config.server?.port || 3000;
   httpServer = startServer(port);
+
+  // Start JavaScript Analyzer loop
+  analyzeLoop = new AnalyzeLoop({
+    client: ollamaClient,
+    rootDir: ROOT,
+    log,
+    autoFormat: config.analyzer?.autoFormat !== false
+  });
+  analyzeLoop.on('analyzed', ({ file }) => {
+    log('info', `[Analyzer] Analyzed: ${path.relative(ROOT, file)}`);
+  });
+  analyzeLoop.on('error', ({ file, error }) => {
+    log('warn', `[Analyzer] Error: ${path.relative(ROOT, file)} — ${error}`);
+  });
+  analyzeLoop.start().catch(err => {
+    log('warn', `[Analyzer] Failed to start: ${err.message}`);
+  });
 
   log('info', 'Think Tank Core fully operational');
 }
@@ -1329,25 +1496,19 @@ async function main() {
     return;
   }
 
-  // --analyze: one-shot folder analysis
+  // --analyze: one-shot folder analysis (delegates to scripts/analyze.js)
   if (args.includes('--analyze')) {
-    try { config = loadConfig(CONFIG_PATH); } catch (err) {
-      console.error('Failed to load config:', err.message);
-      console.error('Run "node main.js --setup" first.');
-      process.exit(1);
-    }
     const idx = args.indexOf('--analyze');
-    const folder = args[idx + 1];
-    if (folder) {
-      const absPath = path.resolve(ROOT, folder);
-      console.log('Analyzing:', absPath);
-      const results = analyzeFolder(absPath);
-      console.log(JSON.stringify(results, null, 2));
-      process.exit(0);
-    } else {
-      console.error('Usage: node main.js --analyze <folder>');
-      process.exit(1);
+    const folders = args.slice(idx + 1);
+    const scriptPath = path.join(ROOT, 'scripts', 'analyze.js');
+    const scriptArgs = folders.length > 0 ? folders : [];
+    const { execFileSync } = require('child_process');
+    try {
+      execFileSync('node', [scriptPath, ...scriptArgs], { stdio: 'inherit', cwd: ROOT });
+    } catch (err) {
+      process.exit(err.status || 1);
     }
+    process.exit(0);
     return;
   }
 
@@ -1406,7 +1567,8 @@ async function main() {
       doubleCheckFn: doubleCheck,
       saveKnowledgeFn: saveKnowledge,
       analyzeFolderWithLLMFn: analyzeFolderWithLLM,
-      scanDirectoryFn: scanDirectory
+      scanDirectoryFn: scanDirectory,
+      getAnalyzeLoop: () => analyzeLoop
     });
   }
 }

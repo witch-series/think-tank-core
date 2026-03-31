@@ -346,7 +346,7 @@
 
 - `fs.readdirSync` で深さ優先探索
 - `node_modules/` と `.git/` は除外
-- `.summary.json` で終わるファイルは除外（生成物との衝突回避）
+- `.summary.md` で終わるファイルは除外（生成物との衝突回避）
 - デフォルトでは `.js` ファイルのみ対象
 
 ### 関数抽出
@@ -362,7 +362,7 @@
 
 ### Summary ファイル形式
 
-各 `.js` ファイルに対応する `.summary.json` を同ディレクトリに生成:
+各 `.js` ファイルに対応する `.summary.md` を同ディレクトリに生成:
 
 ```json
 {
@@ -424,7 +424,7 @@ Dream Phase で1日1回実行:
 2. 各ファイルに対し `validateSyntax` + `runInSandbox` で検証
 3. 結果リストをLLMに送信（`review-scripts.system` プロンプト使用）
 4. LLMが各ファイルについて `keep: true/false` と理由を返却
-5. `keep: false` のファイルを自動削除（`.summary.json` も含む）
+5. `keep: false` のファイルを自動削除（`.summary.md` も含む）
 6. 削除があればGitで自動コミット
 
 ## モジュール生成 (evolution.js)
@@ -555,5 +555,5 @@ Dream Phase で1日1回実行:
 | `targetFolders` | string[] | `["./brain/modules", "./brain/scripts"]` | 自己解析・自動編集の対象フォルダ |
 | `dreamHour` | number | `5` | Dream Phase の実行時刻（時） |
 | `taskInterval` | number | `60000` | 自律タスクの間隔（ミリ秒） |
-| `summaryExtension` | string | `.summary.json` | 要約ファイルの拡張子 |
+| `summaryExtension` | string | `.summary.md` | 要約ファイルの拡張子 |
 | `searchPrompt` | string | (リサーチ指示) | システムの最終目標（ゴール分解・全アクションに影響） |

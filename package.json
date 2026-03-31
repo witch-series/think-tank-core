@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node main.js",
     "setup": "node main.js --setup",
-    "analyze": "node main.js --analyze ./brain/modules",
+    "analyze": "node scripts/analyze.js",
     "ui": "node ui/server.js",
     "reset": "node scripts/reset.js"
   },

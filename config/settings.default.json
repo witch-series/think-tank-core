@@ -15,5 +15,5 @@
   "taskInterval": 60000,
   "maxConcurrentTasks": 1,
   "knowledgeDb": "./brain/knowledge-db",
-  "summaryExtension": ".summary.json"
+  "summaryExtension": ".summary.md"
 }

@@ -9,6 +9,7 @@ class TaskManager extends EventEmitter {
     this.currentTask = null;
     this.running = false;
     this.paused = false;
+    this.lastActivityTime = Date.now();
   }
 
   enqueue(task) {
@@ -57,10 +58,15 @@ class TaskManager extends EventEmitter {
 
     if (this.queue.length === 0) {
       try { this.emit('idle'); } catch {}
+      // Check again — idle handler may have enqueued tasks
+      if (this.queue.length > 0) {
+        setImmediate(() => this._next());
+      }
       return;
     }
 
     this.currentTask = this.queue.shift();
+    this.lastActivityTime = Date.now();
     try { this.emit('task:start', this.currentTask); } catch {}
 
     try {
@@ -70,16 +76,11 @@ class TaskManager extends EventEmitter {
       try { this.emit('task:error', { task: this.currentTask, error: err }); } catch {}
     } finally {
       this.currentTask = null;
-      // Continue processing without delay
+      this.lastActivityTime = Date.now();
       if (this.running && !this.paused) {
-        // If queue is empty, emit idle so the caller can refill it synchronously
-        if (this.queue.length === 0) {
-          try { this.emit('idle'); } catch {}
-        }
-        // Process next task (may have been enqueued by idle handler)
-        if (this.queue.length > 0) {
-          this._next();
-        }
+        // Use setImmediate to avoid stack overflow on long chains
+        // and ensure enqueue from event handlers is processed
+        setImmediate(() => this._next());
       }
     }
   }
@@ -95,7 +96,7 @@ class TaskManager extends EventEmitter {
   }
 }
 
-function createTask(name, executeFn) {
+const createTask = (name, executeFn) => {
   return { name, execute: executeFn, createdAt: new Date().toISOString() };
 }
 

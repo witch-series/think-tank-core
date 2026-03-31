@@ -16,7 +16,7 @@ const MAX_GATHER_STEPS = 6;
 /**
  * Parse a JSON action (object with "action" field) from LLM response.
  */
-function parseAction(responseText) {
+const parseAction = (responseText) => {
   const obj = parseJsonSafe(responseText);
   if (obj && obj.action) return obj;
 
@@ -35,7 +35,7 @@ function parseAction(responseText) {
 
 // --- Tool execution ---
 
-function gitExec(args, repoPath) {
+const gitExec = (args, repoPath) => {
   return new Promise((resolve) => {
     execFile('git', args, { cwd: repoPath, maxBuffer: 1024 * 512 }, (err, stdout) => {
       if (err) { resolve({ error: err.message }); return; }
@@ -44,7 +44,7 @@ function gitExec(args, repoPath) {
   });
 }
 
-function extractFunctionsSimple(code) {
+const extractFunctionsSimple = (code) => {
   const functions = [];
   const patterns = [
     /(?:async\s+)?function\s+(\w+)\s*\(/g,
@@ -60,7 +60,7 @@ function extractFunctionsSimple(code) {
   return [...new Set(functions)];
 }
 
-async function executeTool(action, repoPath, workLogDir) {
+const executeTool = async (action, repoPath, workLogDir) => {
   try {
     switch (action.action) {
       case 'search_web': {
@@ -209,7 +209,7 @@ async function executeTool(action, repoPath, workLogDir) {
         const results = [];
         const searchPattern = action.pattern.toLowerCase();
 
-        function searchInDir(dir, depth) {
+        const searchInDir = (dir, depth) => {
           if (depth > 4 || results.length >= 20) return;
           let entries;
           try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -251,7 +251,7 @@ async function executeTool(action, repoPath, workLogDir) {
 
 // --- Work log helpers ---
 
-function loadRecentWorkLogs(workLogDir, maxEntries = 5) {
+const loadRecentWorkLogs = (workLogDir, maxEntries = 5) => {
   if (!fs.existsSync(workLogDir)) return '';
   const logFiles = fs.readdirSync(workLogDir)
     .filter(f => f.endsWith('.json'))
@@ -271,7 +271,7 @@ function loadRecentWorkLogs(workLogDir, maxEntries = 5) {
   return entries.join('\n');
 }
 
-function cleanOldWorkLogs(workLogDir, maxAgeHours = 72) {
+const cleanOldWorkLogs = (workLogDir, maxAgeHours = 72) => {
   if (!fs.existsSync(workLogDir)) return;
   const cutoff = Date.now() - maxAgeHours * 60 * 60 * 1000;
   try {
@@ -291,7 +291,7 @@ function cleanOldWorkLogs(workLogDir, maxAgeHours = 72) {
  * Uses a hybrid approach: LLM decides search queries, but the system
  * automatically fetches top search result pages (no LLM decision needed).
  */
-async function gatherResearch(client, taskDescription, onLog, options = {}) {
+const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
   const collectedData = [];
   const executedActions = [];
   const visitedUrls = new Set(options.visitedUrls || []);
@@ -521,7 +521,7 @@ async function gatherResearch(client, taskDescription, onLog, options = {}) {
  * Gather data for code analysis tasks.
  * Systematically reads project files without relying on LLM tool calls.
  */
-async function gatherCodeAnalysis(repoPath, targetFolders, onLog) {
+const gatherCodeAnalysis = async (repoPath, targetFolders, onLog) => {
   const collectedData = [];
   const executedActions = [];
 
@@ -598,7 +598,7 @@ async function gatherCodeAnalysis(repoPath, targetFolders, onLog) {
 /**
  * Generic gather using LLM tool calls (fallback for non-standard tasks).
  */
-async function gatherGeneric(client, taskDescription, repoPath, workLogDir, onLog) {
+const gatherGeneric = async (client, taskDescription, repoPath, workLogDir, onLog) => {
   const recentLogs = loadRecentWorkLogs(workLogDir);
 
   const systemPrompt = loadPrompt('gather-generic.system');
@@ -680,7 +680,7 @@ async function gatherGeneric(client, taskDescription, repoPath, workLogDir, onLo
  * Gather data and execute actions for development tasks.
  * Uses LLM tool calls with the full tool set including write_file, exec_command, etc.
  */
-async function gatherDevelop(client, taskDescription, repoPath, workLogDir, onLog, options = {}) {
+const gatherDevelop = async (client, taskDescription, repoPath, workLogDir, onLog, options = {}) => {
   const recentLogs = loadRecentWorkLogs(workLogDir);
   const systemPrompt = loadPrompt('gather-develop.system');
   const MAX_DEV_STEPS = 10;
@@ -773,7 +773,7 @@ async function gatherDevelop(client, taskDescription, repoPath, workLogDir, onLo
  * Summarize collected data into structured insights.
  * Uses a single dedicated LLM call with all gathered content.
  */
-async function summarizeFindings(client, taskDescription, collectedData, onLog) {
+const summarizeFindings = async (client, taskDescription, collectedData, onLog) => {
   if (collectedData.length === 0) {
     return { summary: '', insights: [], empty: true };
   }
@@ -840,7 +840,7 @@ async function summarizeFindings(client, taskDescription, collectedData, onLog) 
  * @param {string} repoPath - Repository root path
  * @param {object} options - { workLogDir, onLog, mode: 'research'|'analyze'|'develop'|'generic' }
  */
-async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
+const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => {
   const workLogDir = options.workLogDir || path.join(repoPath, 'brain', 'work-logs');
   const onLog = options.onLog || (() => {});
   const mode = options.mode || 'generic';
@@ -887,11 +887,21 @@ async function runAgentLoop(client, taskDescription, repoPath, options = {}) {
     if (urlMatch) sourceUrls.push(urlMatch[0]);
   }
 
+  // Build credibility map from collected data
+  const credibilityMap = {};
+  for (const d of collectedData) {
+    if (d.credibility !== undefined) {
+      const urlMatch = (d.source || '').match(/https?:\/\/[^\s)]+/);
+      if (urlMatch) credibilityMap[urlMatch[0]] = d.credibility;
+    }
+  }
+
   const finalResult = {
     summary,
     insights,
     sources: [...new Set(sourceUrls)],
     visitedUrls: gatherResult.visitedUrls || [],
+    credibilityMap,
     dataSourceCount: collectedData.length
   };
 

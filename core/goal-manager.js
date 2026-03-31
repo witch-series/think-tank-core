@@ -11,7 +11,7 @@ const GOALS_PATH = path.resolve(__dirname, '..', 'brain', 'goals.json');
  * Load the current goal state from disk.
  * @returns {{ finalGoal: string, subtasks: Array<{id: string, description: string, status: string, type: string, result?: string, attempts: number, createdAt: string, completedAt?: string}>, decomposedAt: string|null }}
  */
-function loadGoals() {
+const loadGoals = () => {
   try {
     if (fs.existsSync(GOALS_PATH)) {
       return JSON.parse(fs.readFileSync(GOALS_PATH, 'utf-8'));
@@ -23,7 +23,7 @@ function loadGoals() {
 /**
  * Save goal state to disk.
  */
-function saveGoals(goals) {
+const saveGoals = (goals) => {
   const dir = path.dirname(GOALS_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(GOALS_PATH, JSON.stringify(goals, null, 2), 'utf-8');
@@ -39,7 +39,7 @@ function saveGoals(goals) {
  * @param {object} [options] - { model }
  * @returns {Promise<object>} The updated goals object
  */
-async function decomposeGoal(client, goalText, context, options = {}) {
+const decomposeGoal = async (client, goalText, context, options = {}) => {
   const goals = loadGoals();
 
   // Skip if goal hasn't changed and we already have subtasks
@@ -110,7 +110,7 @@ async function decomposeGoal(client, goalText, context, options = {}) {
  *
  * @returns {{ subtask: object|null, progress: { total: number, completed: number, inProgress: number } }}
  */
-function getNextSubtask() {
+const getNextSubtask = () => {
   const goals = loadGoals();
   const completedIds = new Set(
     goals.subtasks.filter(t => t.status === 'completed').map(t => t.id)
@@ -143,7 +143,7 @@ function getNextSubtask() {
 /**
  * Update a subtask's status.
  */
-function updateSubtask(taskId, updates) {
+const updateSubtask = (taskId, updates) => {
   const goals = loadGoals();
   const task = goals.subtasks.find(t => t.id === taskId);
   if (!task) return false;
@@ -164,7 +164,7 @@ function updateSubtask(taskId, updates) {
  * @param {object} [options] - { model }
  * @returns {Promise<object>} Updated goals with assessment
  */
-async function evaluateProgress(client, options = {}) {
+const evaluateProgress = async (client, options = {}) => {
   const goals = loadGoals();
   if (goals.subtasks.length === 0) return goals;
 
@@ -208,7 +208,7 @@ async function evaluateProgress(client, options = {}) {
 /**
  * Get goal summary for display / prompt context.
  */
-function getGoalSummary() {
+const getGoalSummary = () => {
   const goals = loadGoals();
   if (!goals.finalGoal) return null;
 

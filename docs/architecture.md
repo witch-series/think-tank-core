@@ -172,7 +172,7 @@
 
 - `fs.readdirSync` で対象フォルダを深さ優先で再帰スキャン
 - 各 `.js` ファイルから関数名・パラメータ・require・exports を抽出
-- ファイル単位で `.summary.json` を生成
+- ファイル単位で `.summary.md` を生成
 
 ### コード検閲
 
@@ -210,7 +210,7 @@ Dream Phase で1日1回実行:
 1. `brain/modules/` 内の全 `.js` ファイルを走査
 2. 各ファイルに対し `validateSyntax` + `runInSandbox` で検証
 3. 結果をLLMに送信し、有用性を判定（`review-scripts.system` プロンプト使用）
-4. LLMが `keep: false` と判定したファイルを自動削除（`.summary.json` も含む）
+4. LLMが `keep: false` と判定したファイルを自動削除（`.summary.md` も含む）
 5. 削除があればGitで自動コミット
 
 ## 4. 知識DB管理

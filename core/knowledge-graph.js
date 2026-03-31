@@ -8,6 +8,16 @@ const { getModelConfig } = require('../lib/model-config');
 
 const GRAPH_PATH = path.join(__dirname, '..', 'brain', 'knowledge-graph.json');
 
+// --- Graph write lock (prevent concurrent read-modify-write corruption) ---
+let _graphLock = Promise.resolve();
+
+const withGraphLock = (fn) => {
+  const prev = _graphLock;
+  let resolve;
+  _graphLock = new Promise(r => { resolve = r; });
+  return prev.then(() => fn()).finally(resolve);
+}
+
 // --- Shared keyword quality filter ---
 // Used both at insertion (updateGraph) and pruning (pruneGraph) to prevent
 // generic/junk keywords from entering or persisting in the graph.
@@ -109,13 +119,25 @@ function loadGraph() {
 function saveGraph(graph) {
   const dir = path.dirname(GRAPH_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(GRAPH_PATH, JSON.stringify(graph, null, 2), 'utf-8');
+  // Write to temp file first, then rename (atomic on most OS)
+  const tmpPath = GRAPH_PATH + '.tmp';
+  const data = JSON.stringify(graph, null, 2);
+  fs.writeFileSync(tmpPath, data, 'utf-8');
+  // Keep one backup
+  try {
+    if (fs.existsSync(GRAPH_PATH)) fs.copyFileSync(GRAPH_PATH, GRAPH_PATH + '.bak');
+  } catch {}
+  fs.renameSync(tmpPath, GRAPH_PATH);
 }
 
 /**
  * Extract keywords from research results via LLM and update the graph.
  */
 async function updateGraph(client, entry) {
+  return withGraphLock(() => _updateGraphInner(client, entry));
+}
+
+async function _updateGraphInner(client, entry) {
   const graph = loadGraph();
 
   const topic = entry.topic || '';
@@ -243,6 +265,10 @@ async function updateGraph(client, entry) {
  * Merges duplicates, assigns categories, fixes connections.
  */
 async function reviewGraph(client, onLog, options = {}) {
+  return withGraphLock(() => _reviewGraphInner(client, onLog, options));
+}
+
+async function _reviewGraphInner(client, onLog, options = {}) {
   const queryOpts = options.model ? { model: options.model } : {};
   const goalPrompt = options.goalPrompt || '';
   const graph = loadGraph();
@@ -320,6 +346,25 @@ async function reviewGraph(client, onLog, options = {}) {
       }
     }
 
+    // Remove nodes flagged by LLM
+    let nodeRemoveCount = 0;
+    const removeNodes = Array.isArray(result.remove) ? result.remove : [];
+    if (removeNodes.length > 0) {
+      const removedKeys = new Set();
+      for (const label of removeNodes) {
+        const key = normalizeKey(label);
+        if (key && graph.nodes[key]) {
+          delete graph.nodes[key];
+          removedKeys.add(key);
+          nodeRemoveCount++;
+          if (onLog) onLog('debug', `Graph review remove: ${label}`);
+        }
+      }
+      if (removedKeys.size > 0) {
+        graph.edges = graph.edges.filter(e => !removedKeys.has(e.from) && !removedKeys.has(e.to));
+      }
+    }
+
     const removeEdges = Array.isArray(result.removeEdges) ? result.removeEdges : [];
     if (removeEdges.length > 0) {
       // Batch edge removal — collect all pairs to remove, then single filter pass
@@ -336,7 +381,7 @@ async function reviewGraph(client, onLog, options = {}) {
       });
     }
 
-    return { mergeCount, addCount, removeCount };
+    return { mergeCount, addCount, removeCount: removeCount + nodeRemoveCount };
   }
 
   try {
@@ -704,6 +749,10 @@ function getGraphData() {
  * then asks LLM to identify duplicates in batches.
  */
 async function pruneGraph(client, onLog, options = {}) {
+  return withGraphLock(() => _pruneGraphInner(client, onLog, options));
+}
+
+async function _pruneGraphInner(client, onLog, options = {}) {
   const queryOpts = options.model ? { model: options.model } : {};
   const goalPrompt = options.goalPrompt || '';
   const graph = loadGraph();
@@ -853,6 +902,7 @@ async function pruneGraph(client, onLog, options = {}) {
     if (edgeCountsPre[e.to] !== undefined) edgeCountsPre[e.to]++;
   }
 
+  const now = Date.now();
   const autoRemoveKeys = new Set();
   for (const k of currentKeys) {
     const node = graph.nodes[k];
@@ -860,6 +910,7 @@ async function pruneGraph(client, onLog, options = {}) {
     const label = (node.label || k).trim();
     const conn = edgeCountsPre[k] || 0;
     const count = node.count || 1;
+    const ageDays = (now - new Date(node.lastUpdated || node.firstSeen || now).getTime()) / (1000 * 60 * 60 * 24);
 
     // Remove: generic/junk via shared filter
     if (isGenericLabel(label)) {
@@ -868,6 +919,21 @@ async function pruneGraph(client, onLog, options = {}) {
     }
     // Remove: isolated nodes with very short labels (likely fragments)
     if (count <= 1 && conn === 0 && label.length <= 3 && !/[A-Z]{2,}/.test(label)) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
+    // Remove: old stale nodes — low count + few connections + not updated in 30+ days
+    if (ageDays > 30 && count <= 2 && conn <= 1) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
+    // Remove: very old nodes with no meaningful engagement (60+ days, never re-visited)
+    if (ageDays > 60 && count <= 1) {
+      autoRemoveKeys.add(k);
+      continue;
+    }
+    // Remove: isolated nodes with low importance (never confirmed as valuable)
+    if (conn === 0 && count <= 1 && (node.importance || 1) <= 1) {
       autoRemoveKeys.add(k);
       continue;
     }
@@ -1049,9 +1115,10 @@ function cleanupKnowledgeDb(labels) {
           // Remove if topic closely matches any deleted label
           const shouldRemove = lowerLabels.some(l => {
             if (!l || l.length < 2) return false;
-            // Exact match or topic is a substring (both directions, but only for labels >= 4 chars)
+            // Exact match only, or very close match (topic starts/ends with label)
             if (topic === l) return true;
-            if (l.length >= 4 && (topic.includes(l) || l.includes(topic))) return true;
+            // Substring match only for longer labels (>= 8 chars) to avoid false positives
+            if (l.length >= 8 && topic.includes(l)) return true;
             return false;
           });
           if (shouldRemove) {
@@ -1076,6 +1143,7 @@ function cleanupKnowledgeDb(labels) {
  * Also removes matching entries from the knowledge DB.
  */
 function deleteNode(key) {
+  // Sync function — callers should avoid concurrent calls
   const graph = loadGraph();
   if (!graph.nodes[key]) return false;
   const label = graph.nodes[key].label;
@@ -1127,10 +1195,17 @@ function autoConnect(onLog) {
     return true;
   }
 
+  // Filter: only connect nodes that have proven value (count >= 2 or importance >= 2)
+  // This prevents low-quality nodes from gaining connections that shield them from pruning
+  const qualityKeys = keys.filter(k => {
+    const node = graph.nodes[k];
+    return (node.count || 1) >= 2 || (node.importance || 1) >= 2;
+  });
+
   // --- Strategy 1: Shared topics ---
-  // Build topic → keys index
+  // Build topic → keys index (quality nodes only)
   const topicToKeys = new Map();
-  for (const k of keys) {
+  for (const k of qualityKeys) {
     const topics = graph.nodes[k].topics || [];
     for (const t of topics) {
       if (!topicToKeys.has(t)) topicToKeys.set(t, []);
@@ -1139,7 +1214,7 @@ function autoConnect(onLog) {
   }
 
   for (const [topic, topicKeys] of topicToKeys) {
-    if (topicKeys.length < 2 || topicKeys.length > 30) continue; // skip very large groups
+    if (topicKeys.length < 2 || topicKeys.length > 15) continue; // tighter limit to avoid edge explosion
     for (let i = 0; i < topicKeys.length; i++) {
       for (let j = i + 1; j < topicKeys.length; j++) {
         addEdge(topicKeys[i], topicKeys[j], `共通トピック: ${topic.slice(0, 40)}`);
@@ -1158,9 +1233,9 @@ function autoConnect(onLog) {
     if (edgeCounts[e.to] !== undefined) edgeCounts[e.to]++;
   }
 
-  // Group by normalized category
+  // Group by normalized category (quality nodes only)
   const catToKeys = new Map();
-  for (const k of keys) {
+  for (const k of qualityKeys) {
     const cat = normCategory(graph.nodes[k].category);
     if (!cat) continue;
     if (!catToKeys.has(cat)) catToKeys.set(cat, []);
