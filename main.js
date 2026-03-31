@@ -28,6 +28,7 @@ const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./cor
 const { execSync } = require('child_process');
 const { AnalyzeLoop } = require('./core/analyze/analyze-loop');
 const { parseSummaryMarkdown } = require('./core/analyze/structural-analyzer');
+const { loadJsonFile, saveJsonFile, ensureDir } = require('./lib/file-utils');
 
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config', 'settings.json');
@@ -92,10 +93,7 @@ const CHAT_HISTORY_PATH = path.join(ROOT, 'brain', 'chat-history.json');
 const MAX_CHAT_HISTORY = 200;
 
 function loadChatHistory() {
-  try {
-    if (fs.existsSync(CHAT_HISTORY_PATH)) return JSON.parse(fs.readFileSync(CHAT_HISTORY_PATH, 'utf-8'));
-  } catch {}
-  return [];
+  return loadJsonFile(CHAT_HISTORY_PATH, []);
 }
 
 let _chatWriting = false;
@@ -111,9 +109,7 @@ function saveChatMessage(role, text) {
     const history = loadChatHistory();
     history.push({ role, text, timestamp: new Date().toISOString() });
     while (history.length > MAX_CHAT_HISTORY) history.shift();
-    const dir = path.dirname(CHAT_HISTORY_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(CHAT_HISTORY_PATH, JSON.stringify(history), 'utf-8');
+    saveJsonFile(CHAT_HISTORY_PATH, history, false);
   } finally {
     _chatWriting = false;
   }
@@ -124,17 +120,11 @@ const CURIOSITIES_PATH = path.join(ROOT, 'brain', 'curiosities.json');
 const MAX_CURIOSITIES = 100;
 
 function loadCuriosities() {
-  try {
-    if (fs.existsSync(CURIOSITIES_PATH)) return JSON.parse(fs.readFileSync(CURIOSITIES_PATH, 'utf-8'));
-  } catch {}
-  return [];
+  return loadJsonFile(CURIOSITIES_PATH, []);
 }
 
 function saveCuriosities(items) {
-  const dir = path.dirname(CURIOSITIES_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const trimmed = items.slice(-MAX_CURIOSITIES);
-  fs.writeFileSync(CURIOSITIES_PATH, JSON.stringify(trimmed, null, 2), 'utf-8');
+  saveJsonFile(CURIOSITIES_PATH, items.slice(-MAX_CURIOSITIES));
 }
 
 function addCuriosity(topic, source) {
@@ -232,17 +222,12 @@ setInterval(() => {
 const VISITED_URLS_PATH = path.join(ROOT, 'brain', 'visited-urls.json');
 
 function loadVisitedUrlsRaw() {
-  try {
-    if (fs.existsSync(VISITED_URLS_PATH)) {
-      const data = JSON.parse(fs.readFileSync(VISITED_URLS_PATH, 'utf-8'));
-      // Support migration from old format (plain array of strings)
-      if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-        return data.map(url => ({ url, credibility: 0.5, visitedAt: new Date().toISOString() }));
-      }
-      return Array.isArray(data) ? data : [];
-    }
-  } catch {}
-  return [];
+  const data = loadJsonFile(VISITED_URLS_PATH, []);
+  // Support migration from old format (plain array of strings)
+  if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+    return data.map(url => ({ url, credibility: 0.5, visitedAt: new Date().toISOString() }));
+  }
+  return Array.isArray(data) ? data : [];
 }
 
 function loadVisitedUrls() {
@@ -250,9 +235,7 @@ function loadVisitedUrls() {
 }
 
 function saveVisitedUrlsRaw(entries) {
-  const dir = path.dirname(VISITED_URLS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(VISITED_URLS_PATH, JSON.stringify(entries, null, 2), 'utf-8');
+  saveJsonFile(VISITED_URLS_PATH, entries);
 }
 
 function addVisitedUrls(newUrls, credibilityMap) {

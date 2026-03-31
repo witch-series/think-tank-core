@@ -8,6 +8,7 @@ const { validateCode } = require('../lib/configurator');
 const { runInSandbox, validateSyntax, testFile } = require('../lib/sandbox');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 const { parseJsonSafe } = require('../lib/json-parser');
+const { ensureDir } = require('../lib/file-utils');
 
 // --- Git helpers ---
 
@@ -167,7 +168,7 @@ const getAllKnowledge = (knowledgeDbPath) => {
 }
 
 const saveKnowledge = (knowledgeDbPath, category, data) => {
-  if (!fs.existsSync(knowledgeDbPath)) fs.mkdirSync(knowledgeDbPath, { recursive: true });
+  ensureDir(knowledgeDbPath);
   const filePath = path.join(knowledgeDbPath, `${category}.jsonl`);
   const entry = { ...data, timestamp: new Date().toISOString() };
   // Sanitize all string values to prevent sensitive data leakage
@@ -405,7 +406,7 @@ const generateModule = async (client, topic, knowledge, modulesDir) => {
   }
 
   // Write and commit
-  if (!fs.existsSync(modulesDir)) fs.mkdirSync(modulesDir, { recursive: true });
+  ensureDir(modulesDir);
   fs.writeFileSync(filePath, code, 'utf-8');
 
   const commitResult = await autoCommit(

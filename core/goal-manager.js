@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { loadPrompt, fillPrompt } = require('../lib/prompt-loader');
 const { parseJsonSafe } = require('../lib/json-parser');
+const { loadJsonFile, saveJsonFile } = require('../lib/file-utils');
 
 const GOALS_PATH = path.resolve(__dirname, '..', 'brain', 'goals.json');
 
@@ -11,23 +12,12 @@ const GOALS_PATH = path.resolve(__dirname, '..', 'brain', 'goals.json');
  * Load the current goal state from disk.
  * @returns {{ finalGoal: string, subtasks: Array<{id: string, description: string, status: string, type: string, result?: string, attempts: number, createdAt: string, completedAt?: string}>, decomposedAt: string|null }}
  */
-const loadGoals = () => {
-  try {
-    if (fs.existsSync(GOALS_PATH)) {
-      return JSON.parse(fs.readFileSync(GOALS_PATH, 'utf-8'));
-    }
-  } catch {}
-  return { finalGoal: '', subtasks: [], decomposedAt: null };
-}
+const loadGoals = () => loadJsonFile(GOALS_PATH, { finalGoal: '', subtasks: [], decomposedAt: null });
 
 /**
  * Save goal state to disk.
  */
-const saveGoals = (goals) => {
-  const dir = path.dirname(GOALS_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(GOALS_PATH, JSON.stringify(goals, null, 2), 'utf-8');
-}
+const saveGoals = (goals) => saveJsonFile(GOALS_PATH, goals);
 
 /**
  * Decompose a high-level goal into subtasks using LLM.

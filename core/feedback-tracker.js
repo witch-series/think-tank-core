@@ -1,7 +1,7 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
+const { loadJsonFile, saveJsonFile } = require('../lib/file-utils');
 
 const FEEDBACK_PATH = path.resolve(__dirname, '..', 'brain', 'feedback.json');
 const MAX_ENTRIES = 200;
@@ -10,24 +10,14 @@ const MAX_ENTRIES = 200;
  * Load feedback history from disk.
  * @returns {Array<{action: string, topic: string, success: boolean, reason?: string, timestamp: string}>}
  */
-const loadFeedback = () => {
-  try {
-    if (fs.existsSync(FEEDBACK_PATH)) {
-      return JSON.parse(fs.readFileSync(FEEDBACK_PATH, 'utf-8'));
-    }
-  } catch {}
-  return [];
-}
+const loadFeedback = () => loadJsonFile(FEEDBACK_PATH, []);
 
 /**
  * Save feedback history to disk.
  */
 const saveFeedback = (entries) => {
-  const dir = path.dirname(FEEDBACK_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  // Keep only recent entries
   const trimmed = entries.slice(-MAX_ENTRIES);
-  fs.writeFileSync(FEEDBACK_PATH, JSON.stringify(trimmed, null, 2), 'utf-8');
+  saveJsonFile(FEEDBACK_PATH, trimmed);
 }
 
 /**

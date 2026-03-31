@@ -5,6 +5,7 @@ const path = require('path');
 const { analyzeFile } = require('../../lib/analyzer');
 const { fillPrompt } = require('../../lib/prompt-loader');
 const { parseJsonSafe } = require('../../lib/json-parser');
+const { ensureDir } = require('../../lib/file-utils');
 
 /**
  * Structural Analyzer: analyzes file-level structure using unit analysis results.
@@ -205,16 +206,19 @@ const parseSummaryMarkdown = (mdContent) => {
  * @param {string} filePath - Original source file path
  * @param {object} summary - Analysis summary object
  */
-const saveSummary = (rootDir, filePath, summary) => {
+/**
+ * Get the output path for a summary file.
+ */
+const getSummaryPath = (rootDir, filePath) => {
   const relative = path.relative(rootDir, filePath);
   const summaryName = relative.replace(/\.js$/, '.summary.md');
-  const outputPath = path.join(rootDir, 'analyze-result', summaryName);
+  return path.join(rootDir, 'analyze-result', summaryName);
+}
 
-  const dir = path.dirname(outputPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
+const saveSummary = (rootDir, filePath, summary) => {
+  const outputPath = getSummaryPath(rootDir, filePath);
+  ensureDir(path.dirname(outputPath));
+  const relative = path.relative(rootDir, filePath);
   const markdown = summaryToMarkdown(summary, relative);
   fs.writeFileSync(outputPath, markdown, 'utf-8');
   return outputPath;
@@ -228,9 +232,7 @@ const saveSummary = (rootDir, filePath, summary) => {
  * @returns {object|null} Existing summary or null if stale/missing
  */
 const loadExistingSummary = (rootDir, filePath) => {
-  const relative = path.relative(rootDir, filePath);
-  const summaryName = relative.replace(/\.js$/, '.summary.md');
-  const outputPath = path.join(rootDir, 'analyze-result', summaryName);
+  const outputPath = getSummaryPath(rootDir, filePath);
 
   try {
     if (!fs.existsSync(outputPath)) return null;

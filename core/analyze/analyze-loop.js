@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { scanDirectory } = require('../../lib/analyzer');
+const { loadJsonFile, saveJsonFile, ensureDir } = require('../../lib/file-utils');
 const { startWatcher } = require('../../lib/watcher');
 const { formatCode } = require('./formatter');
 const { analyzeUnits } = require('./unit-analyzer');
@@ -246,20 +247,11 @@ class AnalyzeLoop extends EventEmitter {
   }
 
   _loadRepairList() {
-    const listPath = this._getRepairListPath();
-    try {
-      if (fs.existsSync(listPath)) {
-        return JSON.parse(fs.readFileSync(listPath, 'utf-8'));
-      }
-    } catch {}
-    return { files: [] };
+    return loadJsonFile(this._getRepairListPath(), { files: [] });
   }
 
   _saveRepairList(list) {
-    const listPath = this._getRepairListPath();
-    const dir = path.dirname(listPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(listPath, JSON.stringify(list, null, 2), 'utf-8');
+    saveJsonFile(this._getRepairListPath(), list);
   }
 
   _addToRepairList(filePath, error) {
@@ -394,7 +386,7 @@ class AnalyzeLoop extends EventEmitter {
 
       // 4. Save to brain/analysis/ as JSONL
       const analysisDir = path.join(this.rootDir, 'brain', 'analysis');
-      if (!fs.existsSync(analysisDir)) fs.mkdirSync(analysisDir, { recursive: true });
+      ensureDir(analysisDir);
 
       const dateStr = new Date().toISOString().slice(0, 10);
       const outputPath = path.join(analysisDir, `code-analysis-${dateStr}.jsonl`);

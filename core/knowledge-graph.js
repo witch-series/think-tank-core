@@ -5,6 +5,7 @@ const path = require('path');
 const { fillPrompt } = require('../lib/prompt-loader');
 const { parseJsonSafe } = require('../lib/json-parser');
 const { getModelConfig } = require('../lib/model-config');
+const { loadJsonFile, ensureDir } = require('../lib/file-utils');
 
 const GRAPH_PATH = path.join(__dirname, '..', 'brain', 'knowledge-graph.json');
 
@@ -110,15 +111,11 @@ function isGenericLabel(label) {
 }
 
 function loadGraph() {
-  try {
-    if (fs.existsSync(GRAPH_PATH)) return JSON.parse(fs.readFileSync(GRAPH_PATH, 'utf-8'));
-  } catch {}
-  return { nodes: {}, edges: [], processedTimestamps: [] };
+  return loadJsonFile(GRAPH_PATH, { nodes: {}, edges: [], processedTimestamps: [] });
 }
 
 function saveGraph(graph) {
-  const dir = path.dirname(GRAPH_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  ensureDir(path.dirname(GRAPH_PATH));
   // Write to temp file first, then rename (atomic on most OS)
   const tmpPath = GRAPH_PATH + '.tmp';
   const data = JSON.stringify(graph, null, 2);
@@ -655,12 +652,7 @@ const SCORE_HISTORY_PATH = path.join(__dirname, '..', 'brain', 'graph-score-hist
  */
 function recordAndAnalyzeScore() {
   const current = calculateGraphScore();
-  let history = [];
-  try {
-    if (fs.existsSync(SCORE_HISTORY_PATH)) {
-      history = JSON.parse(fs.readFileSync(SCORE_HISTORY_PATH, 'utf-8'));
-    }
-  } catch {}
+  let history = loadJsonFile(SCORE_HISTORY_PATH, []);
 
   history.push({ score: current.score, timestamp: new Date().toISOString(), ...current });
   if (history.length > 20) history = history.slice(-20);
