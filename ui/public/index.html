@@ -1097,6 +1097,13 @@
         thinkingEl.remove();
         if (data.reply) {
           addChatMsg('assistant', data.reply);
+          // Reflect searchPrompt update triggered by chat
+          if (data.searchPrompt) {
+            const el = document.getElementById('setting-search-prompt');
+            if (el && el.value !== data.searchPrompt) {
+              el.value = data.searchPrompt;
+            }
+          }
         } else if (data.error) {
           addChatMsg('thinking', 'Error: ' + data.error);
         }

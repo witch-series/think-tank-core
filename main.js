@@ -52,7 +52,7 @@ function log(level, message, data) {
 // --- System Documentation for Chat ---
 const DOCS_DIR = path.join(ROOT, 'docs');
 
-function loadSystemDocs() {
+const loadSystemDocs = () => {
   const docFiles = ['architecture.md', 'technical-specs.md', 'directory-structure.md'];
   const docs = [];
   for (const file of docFiles) {
@@ -73,7 +73,7 @@ function loadSystemDocs() {
   return docs.join('\n\n---\n\n');
 }
 
-function isSystemQuestion(message) {
+const isSystemQuestion = (message) => {
   const patterns = [
     /このシステム/, /think.?tank/, /仕組み/, /アーキテクチャ/,
     /どう(やって|動い|なって)/, /機能/, /セキュリティ/,
@@ -92,13 +92,13 @@ function isSystemQuestion(message) {
 const CHAT_HISTORY_PATH = path.join(ROOT, 'brain', 'chat-history.json');
 const MAX_CHAT_HISTORY = 200;
 
-function loadChatHistory() {
+const loadChatHistory = () => {
   return loadJsonFile(CHAT_HISTORY_PATH, []);
 }
 
 let _chatWriting = false;
 
-function saveChatMessage(role, text) {
+const saveChatMessage = (role, text) => {
   // Simple guard to prevent interleaved reads/writes
   if (_chatWriting) {
     setTimeout(() => saveChatMessage(role, text), 50);
@@ -119,15 +119,15 @@ function saveChatMessage(role, text) {
 const CURIOSITIES_PATH = path.join(ROOT, 'brain', 'curiosities.json');
 const MAX_CURIOSITIES = 100;
 
-function loadCuriosities() {
+const loadCuriosities = () => {
   return loadJsonFile(CURIOSITIES_PATH, []);
 }
 
-function saveCuriosities(items) {
+const saveCuriosities = (items) => {
   saveJsonFile(CURIOSITIES_PATH, items.slice(-MAX_CURIOSITIES));
 }
 
-function addCuriosity(topic, source) {
+const addCuriosity = (topic, source) => {
   const items = loadCuriosities();
   const isDupe = items.some(c => !c.explored && c.topic.slice(0, 30) === topic.slice(0, 30));
   if (isDupe) return;
@@ -135,12 +135,12 @@ function addCuriosity(topic, source) {
   saveCuriosities(items);
 }
 
-function getNextCuriosity() {
+const getNextCuriosity = () => {
   const items = loadCuriosities();
   return items.find(c => !c.explored) || null;
 }
 
-function markCuriosityExplored(topic) {
+const markCuriosityExplored = (topic) => {
   const items = loadCuriosities();
   const item = items.find(c => c.topic === topic && !c.explored);
   if (item) {
@@ -221,7 +221,7 @@ setInterval(() => {
 // --- Helper: visited URL tracking (with quality metadata) ---
 const VISITED_URLS_PATH = path.join(ROOT, 'brain', 'visited-urls.json');
 
-function loadVisitedUrlsRaw() {
+const loadVisitedUrlsRaw = () => {
   const data = loadJsonFile(VISITED_URLS_PATH, []);
   // Support migration from old format (plain array of strings)
   if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
@@ -230,15 +230,15 @@ function loadVisitedUrlsRaw() {
   return Array.isArray(data) ? data : [];
 }
 
-function loadVisitedUrls() {
+const loadVisitedUrls = () => {
   return loadVisitedUrlsRaw().map(e => typeof e === 'string' ? e : e.url);
 }
 
-function saveVisitedUrlsRaw(entries) {
+const saveVisitedUrlsRaw = (entries) => {
   saveJsonFile(VISITED_URLS_PATH, entries);
 }
 
-function addVisitedUrls(newUrls, credibilityMap) {
+const addVisitedUrls = (newUrls, credibilityMap) => {
   const existing = loadVisitedUrlsRaw();
   const urlIndex = new Map(existing.map(e => [e.url, e]));
   const now = new Date().toISOString();
@@ -289,9 +289,20 @@ function detectAndStoreCuriosity(client, userMessage) {
       const parsed = parseJsonSafe(text);
       if (!parsed) return;
       if (parsed.isResearch && parsed.searchPrompt && parsed.searchPrompt !== 'null') {
-        // Store as curiosity — never modify the main goal (searchPrompt)
         addCuriosity(parsed.searchPrompt, 'user_chat');
         log('info', `Curiosity recorded from chat: "${parsed.searchPrompt.slice(0, 80)}"`);
+
+        // Update searchPrompt so the next research cycle targets this topic
+        try {
+          const settingsPath = path.join(ROOT, 'config', 'settings.json');
+          const current = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+          current.searchPrompt = parsed.searchPrompt;
+          fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf-8');
+          config.searchPrompt = parsed.searchPrompt;
+          log('info', `searchPrompt updated from chat: "${parsed.searchPrompt.slice(0, 80)}"`);
+        } catch (e2) {
+          log('warn', `Failed to update searchPrompt: ${e2.message}`);
+        }
       }
     } catch (e) {
       log('debug', `Research intent detection failed: ${e.message}`);
@@ -412,7 +423,7 @@ function collectContext() {
 // --- Activity Phase Tracking ---
 let activityPhase = { phase: 'idle', detail: '', startedAt: null };
 
-function setPhase(phase, detail = '') {
+const setPhase = (phase, detail = '') => {
   activityPhase = { phase, detail, startedAt: new Date().toISOString() };
   log('debug', `Phase: ${phase}${detail ? ' — ' + detail : ''}`);
 }
@@ -421,10 +432,10 @@ function setPhase(phase, detail = '') {
 let cycleCount = 0;
 let lastAnalysisCycle = 0;
 
-function getResearchDbPath() { return path.resolve(ROOT, 'brain', 'research'); }
-function getAnalysisDbPath() { return path.resolve(ROOT, 'brain', 'analysis'); }
+const getResearchDbPath = () => { return path.resolve(ROOT, 'brain', 'research'); }
+const getAnalysisDbPath = () => { return path.resolve(ROOT, 'brain', 'analysis'); }
 
-function gitPull() {
+const gitPull = () => {
   try {
     const result = execSync('git pull --ff-only', { cwd: ROOT, timeout: 30000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
     const msg = result.trim();
@@ -436,7 +447,7 @@ function gitPull() {
   }
 }
 
-function scheduleAutonomousTasks() {
+const scheduleAutonomousTasks = () => {
   cycleCount++;
 
   // Pull latest code before each cycle
@@ -1379,7 +1390,7 @@ function shutdown() {
   });
 }
 
-async function restart() {
+const restart = async () => {
   log('info', 'Restarting...');
   await shutdown();
 
