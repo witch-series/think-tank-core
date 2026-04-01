@@ -875,8 +875,9 @@
             (data.ollama ? (
               '<div class="stat"><span class="label">URL</span><span class="value">' + esc(data.ollama.currentUrl || '\u2014') + '</span></div>' +
               '<div class="stat"><span class="label">Model</span><span class="value">' + esc(data.ollama.model || '\u2014') + '</span></div>' +
-              '<div class="stat"><span class="label">Fail Count</span><span class="value">' + (data.ollama.failCount || 0) + '</span></div>' +
-              '<div class="stat"><span class="label">URLs</span><span class="value">' + esc((data.ollama.urls || []).join(', ')) + '</span></div>'
+              '<div class="stat"><span class="label">Workers</span><span class="value">' + (data.ollama.activeWorkers || 0) + '/' + (data.ollama.totalAlive || 0) + ' active</span></div>' +
+              '<div class="stat"><span class="label">Queue</span><span class="value">P:' + (data.ollama.priorityQueueLength || 0) + ' N:' + (data.ollama.normalQueueLength || 0) + '</span></div>' +
+              '<div class="stat"><span class="label">URLs</span><span class="value">' + esc((data.ollama.urls || []).map(function(u) { return (u.url || u) + (u.alive === false ? ' \u2718' : ' \u2714'); }).join(', ')) + '</span></div>'
             ) : '<div class="stat"><span class="label">Status</span><span class="value">Not connected</span></div>') +
           '</div>' +
           '<div class="status-section">' +

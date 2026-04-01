@@ -144,10 +144,7 @@ const postChatReport = (client, topic, findings) => {
         saveChatMessage('assistant', reply);
       }
     } catch (e) {
-      // Fallback: post raw summary if LLM fails
-      const fallback = typeof findings === 'string' ? findings
-        : `${topic}の調査が完了しました。${(findings.summary || '').slice(0, 300)}`;
-      saveChatMessage('system', fallback);
+      // Do not post fallback to chat — avoid noisy/duplicate messages
       log('debug', `Chat report generation failed: ${e.message}`);
     }
   })();
@@ -353,7 +350,9 @@ const supplementChatWithSearch = (client, userMessage, initialReply, existingKno
   // Fire-and-forget: check if reply indicates insufficient knowledge, then search
   (async () => {
     try {
-      const checkPrompt = `以下の質問と回答を分析してください。回答に十分な情報が含まれていない、または「わかりません」「情報がありません」等の不確かな回答の場合はtrueを返してください。
+      const checkPrompt = `以下の質問と回答を分析してください。
+回答が明確に「わかりません」「情報がありません」「調査します」等と述べている場合のみ needsSearch: true を返してください。
+回答に何らかの具体的な情報が含まれている場合は needsSearch: false です。
 
 質問: ${userMessage.slice(0, 200)}
 回答: ${initialReply.slice(0, 300)}

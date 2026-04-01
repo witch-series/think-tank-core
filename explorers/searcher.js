@@ -295,12 +295,11 @@ const searchGitHub = async (query, maxResults = 5) => {
  * @returns {Promise<Array<{url: string, title: string, snippet: string, credibility: number}>>}
  */
 const searchWeb = async (query, maxResults = 5) => {
-  // Run Brave and DDG in parallel, use Brave results if available, else DDG
-  const [braveResults, ddgResults] = await Promise.all([
-    searchBrave(query, maxResults).catch(() => []),
-    searchDDG(query, maxResults).catch(() => [])
-  ]);
-  const results = braveResults.length > 0 ? braveResults : ddgResults;
+  // Start both, but resolve early if Brave succeeds (don't wait for DDG)
+  const bravePromise = searchBrave(query, maxResults).catch(() => []);
+  const ddgPromise = searchDDG(query, maxResults).catch(() => []);
+  const braveResults = await bravePromise;
+  const results = braveResults.length > 0 ? braveResults : await ddgPromise;
 
   // Attach credibility scores and filter out blocked sources
   return results.map(r => ({
@@ -320,7 +319,7 @@ const fetchPage = async (pageUrl, maxLength = 6000) => {
         'Accept': 'text/html,text/plain,application/json',
         'Accept-Language': 'ja,en;q=0.9'
       },
-      timeout: 12000
+      timeout: 8000
     });
 
     if (res.status !== 200) return { url: pageUrl, error: `HTTP ${res.status}` };
