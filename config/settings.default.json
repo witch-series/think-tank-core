@@ -14,6 +14,5 @@
   "dreamHour": 5,
   "taskInterval": 60000,
   "maxConcurrentTasks": 1,
-  "knowledgeDb": "./brain/knowledge-db",
-  "summaryExtension": ".summary.md"
+  "knowledgeDb": "./brain/knowledge-db"
 }

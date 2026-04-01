@@ -244,7 +244,20 @@ const loadExistingSummary = (rootDir, filePath) => {
     if (sourceStat.mtimeMs > summaryStat.mtimeMs) return null;
 
     const content = fs.readFileSync(outputPath, 'utf-8');
-    return parseSummaryMarkdown(content);
+    const summary = parseSummaryMarkdown(content);
+    if (!summary) return null;
+
+    // Check LLM quality: if most functions have empty purpose, treat as stale
+    const funcs = summary.functions || [];
+    if (funcs.length > 0) {
+      const emptyCount = funcs.filter(f => !f.purpose).length;
+      if (emptyCount === funcs.length) return null; // All empty — re-analyze
+    }
+
+    // Structural analysis missing — re-analyze
+    if (!summary.role && summary.structure?.dependencyHealth === 'unknown') return null;
+
+    return summary;
   } catch {
     return null;
   }

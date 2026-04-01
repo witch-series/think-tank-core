@@ -555,5 +555,4 @@ Dream Phase で1日1回実行:
 | `targetFolders` | string[] | `["./brain/modules", "./brain/scripts"]` | 自己解析・自動編集の対象フォルダ |
 | `dreamHour` | number | `5` | Dream Phase の実行時刻（時） |
 | `taskInterval` | number | `60000` | 自律タスクの間隔（ミリ秒） |
-| `summaryExtension` | string | `.summary.md` | 要約ファイルの拡張子 |
 | `searchPrompt` | string | (リサーチ指示) | システムの最終目標（ゴール分解・全アクションに影響） |
