@@ -38,7 +38,7 @@ const logs = [];
 const maxLogs = 500;
 let logWriter = null; // overridable by CLI
 
-function log(level, message, data) {
+const log = (level, message, data) => {
   const entry = { timestamp: new Date().toISOString(), level, message, data };
   logs.push(entry);
   if (logs.length > maxLogs) logs.shift();
@@ -47,7 +47,7 @@ function log(level, message, data) {
   } else if (level !== 'debug') {
     console.log(`[${entry.timestamp}] [${level}] ${message}`);
   }
-}
+};
 
 // --- System Documentation for Chat ---
 const DOCS_DIR = path.join(ROOT, 'docs');
@@ -258,7 +258,7 @@ const addVisitedUrls = (newUrls, credibilityMap) => {
 }
 
 // Periodic cleanup: remove low-quality URLs older than 30 days, keep high-quality ones
-function cleanupVisitedUrls() {
+const cleanupVisitedUrls = () => {
   const entries = loadVisitedUrlsRaw();
   if (entries.length < 1000) return; // no need to clean small lists
 
@@ -275,11 +275,11 @@ function cleanupVisitedUrls() {
     log('info', `URL cleanup: removed ${entries.length - cleaned.length} low-quality old URLs (${cleaned.length} remaining)`);
     saveVisitedUrlsRaw(cleaned);
   }
-}
+};
 
 // --- Helper: detect research intent from user chat and store as curiosity ---
 
-function detectAndStoreCuriosity(client, userMessage) {
+const detectAndStoreCuriosity = (client, userMessage) => {
   // Fire-and-forget — don't block the chat response
   (async () => {
     try {
@@ -295,9 +295,9 @@ function detectAndStoreCuriosity(client, userMessage) {
         // Update searchPrompt so the next research cycle targets this topic
         try {
           const settingsPath = path.join(ROOT, 'config', 'settings.json');
-          const current = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+          const current = loadJsonFile(settingsPath, {});
           current.searchPrompt = parsed.searchPrompt;
-          fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf-8');
+          saveJsonFile(settingsPath, current);
           config.searchPrompt = parsed.searchPrompt;
           log('info', `searchPrompt updated from chat: "${parsed.searchPrompt.slice(0, 80)}"`);
         } catch (e2) {
@@ -308,10 +308,10 @@ function detectAndStoreCuriosity(client, userMessage) {
       log('debug', `Research intent detection failed: ${e.message}`);
     }
   })();
-}
+};
 
 // --- Helper: supplement chat with background search ---
-function supplementChatWithSearch(client, userMessage, initialReply, existingKnowledge) {
+const supplementChatWithSearch = (client, userMessage, initialReply, existingKnowledge) => {
   // Fire-and-forget: check if reply indicates insufficient knowledge, then search
   (async () => {
     try {
@@ -359,10 +359,10 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
       log('debug', `Supplement search failed: ${e.message}`);
     }
   })();
-}
+};
 
 // --- Helper: collect codebase context ---
-function collectContext() {
+const collectContext = () => {
   const folders = config.targetFolders || [];
   let fileCount = 0;
   const functionNames = [];
@@ -418,7 +418,7 @@ function collectContext() {
     analyzerIssues,
     analyzerSuggestions
   };
-}
+};
 
 // --- Activity Phase Tracking ---
 let activityPhase = { phase: 'idle', detail: '', startedAt: null };
@@ -946,7 +946,7 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
 }
 
 // --- Dream Phase Scheduler ---
-function scheduleDream() {
+const scheduleDream = () => {
   const now = new Date();
   const dreamHour = config.dreamHour || 5;
   const next = new Date(now);
@@ -1023,10 +1023,10 @@ function scheduleDream() {
 
     scheduleDream();
   }, delay);
-}
+};
 
 // --- API Server ---
-function startServer(port) {
+const startServer = (port) => {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
     const method = req.method;
@@ -1289,12 +1289,8 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
       } else if (method === 'GET' && url.pathname === '/settings') {
         // Return current settings (safe subset)
         const settingsPath = path.join(ROOT, 'config', 'settings.json');
-        try {
-          const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-          res.end(JSON.stringify(settings));
-        } catch (e) {
-          res.end(JSON.stringify({}));
-        }
+        const settings = loadJsonFile(settingsPath, {});
+        res.end(JSON.stringify(settings));
 
       } else if (method === 'POST' && url.pathname === '/settings') {
         let body = '';
@@ -1302,7 +1298,7 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
         const updates = JSON.parse(body);
         const settingsPath = path.join(ROOT, 'config', 'settings.json');
         try {
-          const current = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+          const current = loadJsonFile(settingsPath, {});
           // Apply allowed updates
           if (updates.ollama) {
             if (!current.ollama) current.ollama = {};
@@ -1321,7 +1317,7 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
           if (updates.voice) {
             current.voice = Object.assign(current.voice || {}, updates.voice);
           }
-          fs.writeFileSync(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf-8');
+          saveJsonFile(settingsPath, current);
           // Reload config in memory
           config = Object.assign(config, current);
           if (ollamaClient && current.ollama) {
@@ -1360,10 +1356,10 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
   });
 
   return server;
-}
+};
 
 // --- Shutdown & Restart ---
-function shutdown() {
+const shutdown = () => {
   return new Promise((resolve) => {
     restarting = true;
     taskManager.stop();
@@ -1388,7 +1384,7 @@ function shutdown() {
       resolve();
     }
   });
-}
+};
 
 const restart = async () => {
   log('info', 'Restarting...');
@@ -1415,7 +1411,7 @@ const restart = async () => {
 }
 
 // --- Bootstrap ---
-function start() {
+const start = () => {
   log('info', 'Think Tank Core starting');
 
   // Create Ollama client with multi-URL failover support
@@ -1485,10 +1481,10 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
   });
 
   log('info', 'Think Tank Core fully operational');
-}
+};
 
 // --- CLI Entrypoint ---
-async function main() {
+const main = async () => {
   const args = process.argv.slice(2);
 
   // --setup: force interactive setup
@@ -1574,7 +1570,7 @@ async function main() {
       getAnalyzeLoop: () => analyzeLoop
     });
   }
-}
+};
 
 main();
 

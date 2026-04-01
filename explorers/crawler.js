@@ -3,11 +3,12 @@
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
+const { wait } = require('../lib/utils');
 
 const MAX_REDIRECTS = 5;
 const DEFAULT_TIMEOUT = 15000;
 
-function fetch(urlString, options = {}) {
+const fetch = (urlString, options = {}) => {
   const maxRedirects = options.maxRedirects ?? MAX_REDIRECTS;
   const timeout = options.timeout ?? DEFAULT_TIMEOUT;
 
@@ -106,13 +107,9 @@ function fetch(urlString, options = {}) {
 
     doRequest(urlString, options);
   });
-}
+};
 
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function fetchWithRetry(urlString, options = {}, maxRetries = 3) {
+const fetchWithRetry = async (urlString, options = {}, maxRetries = 3) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await fetch(urlString, options);
@@ -124,6 +121,6 @@ async function fetchWithRetry(urlString, options = {}, maxRetries = 3) {
       await wait(delay);
     }
   }
-}
+};
 
 module.exports = { fetch, fetchWithRetry };

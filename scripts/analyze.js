@@ -28,7 +28,7 @@ const log = (level, msg) => {
   if (level !== 'debug') console.log(`[${level}] ${msg}`);
 };
 
-async function checkOllamaConnection(client) {
+const checkOllamaConnection = async (client) => {
   try {
     const http = require('http');
     const url = new URL(client.url);
@@ -44,7 +44,7 @@ async function checkOllamaConnection(client) {
   }
 }
 
-async function main() {
+const main = async () => {
   const rawArgs = process.argv.slice(2);
   const staticOnly = rawArgs.includes('--static');
   const folderArgs = rawArgs.filter(a => a !== '--static');

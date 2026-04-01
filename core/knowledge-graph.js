@@ -99,7 +99,7 @@ const GENERIC_PHRASE_PATTERNS = [
  * Check if a label is too generic / junk to be a knowledge graph keyword.
  * Returns true if the label should be REJECTED.
  */
-function isGenericLabel(label) {
+const isGenericLabel = (label) => {
   if (!label || label.length <= 1) return true;
   if (JUNK_PATTERN.test(label)) return true;
   if (TOO_GENERIC_JA.has(label)) return true;
@@ -108,13 +108,13 @@ function isGenericLabel(label) {
   // Purely short hiragana/katakana (not proper nouns)
   if (/^[\u3040-\u309f\u30a0-\u30ff]{1,6}$/.test(label) && !/[A-Za-z0-9\u4e00-\u9fff]/.test(label)) return true;
   return false;
-}
+};
 
-function loadGraph() {
+const loadGraph = () => {
   return loadJsonFile(GRAPH_PATH, { nodes: {}, edges: [], processedTimestamps: [] });
-}
+};
 
-function saveGraph(graph) {
+const saveGraph = (graph) => {
   ensureDir(path.dirname(GRAPH_PATH));
   // Write to temp file first, then rename (atomic on most OS)
   const tmpPath = GRAPH_PATH + '.tmp';
@@ -125,16 +125,16 @@ function saveGraph(graph) {
     if (fs.existsSync(GRAPH_PATH)) fs.copyFileSync(GRAPH_PATH, GRAPH_PATH + '.bak');
   } catch {}
   fs.renameSync(tmpPath, GRAPH_PATH);
-}
+};
 
 /**
  * Extract keywords from research results via LLM and update the graph.
  */
-async function updateGraph(client, entry) {
+const updateGraph = async (client, entry) => {
   return withGraphLock(() => _updateGraphInner(client, entry));
-}
+};
 
-async function _updateGraphInner(client, entry) {
+const _updateGraphInner = async (client, entry) => {
   const graph = loadGraph();
 
   const topic = entry.topic || '';
@@ -265,17 +265,17 @@ async function _updateGraphInner(client, entry) {
 
   saveGraph(graph);
   return graph;
-}
+};
 
 /**
  * Review and reorganize the entire graph via LLM.
  * Merges duplicates, assigns categories, fixes connections.
  */
-async function reviewGraph(client, onLog, options = {}) {
+const reviewGraph = async (client, onLog, options = {}) => {
   return withGraphLock(() => _reviewGraphInner(client, onLog, options));
-}
+};
 
-async function _reviewGraphInner(client, onLog, options = {}) {
+const _reviewGraphInner = async (client, onLog, options = {}) => {
   const queryOpts = options.model ? { model: options.model } : {};
   const goalPrompt = options.goalPrompt || '';
   const graph = loadGraph();
@@ -448,13 +448,13 @@ async function _reviewGraphInner(client, onLog, options = {}) {
   }
 
   return graph;
-}
+};
 
 /**
  * Process knowledge entries that haven't been indexed into the graph yet.
  * Called on startup to catch up on unprocessed data.
  */
-async function processUnindexedEntries(client, knowledgeDbPaths, onLog) {
+const processUnindexedEntries = async (client, knowledgeDbPaths, onLog) => {
   const graph = loadGraph();
   const processed = new Set(graph.processedTimestamps || []);
 
@@ -500,12 +500,12 @@ async function processUnindexedEntries(client, knowledgeDbPaths, onLog) {
 
   if (onLog) onLog('info', `Knowledge graph: indexed ${indexed} entries`);
   return indexed;
-}
+};
 
 /**
  * Get under-explored keywords — prioritize nodes with few connections and low count.
  */
-function getUnderExplored(limit = 10, recentTopics = []) {
+const getUnderExplored = (limit = 10, recentTopics = []) => {
   const graph = loadGraph();
   const nodes = Object.entries(graph.nodes);
   if (nodes.length === 0) return [];
@@ -551,13 +551,13 @@ function getUnderExplored(limit = 10, recentTopics = []) {
     }
   }
   return result;
-}
+};
 
 /**
  * Get weakly-connected keyword pairs: pick isolated nodes and suggest
  * a well-connected node to search together, so the LLM can find bridges.
  */
-function getSuggestedSearchPairs(limit = 3, recentTopics = []) {
+const getSuggestedSearchPairs = (limit = 3, recentTopics = []) => {
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 4) return [];
@@ -618,14 +618,14 @@ function getSuggestedSearchPairs(limit = 3, recentTopics = []) {
     }
   }
   return pairs;
-}
+};
 
 /**
  * Calculate a numeric score for the graph's quality/growth.
  * Higher = more developed knowledge graph.
  * Components: node count, edge count, connectivity density, category diversity.
  */
-function calculateGraphScore() {
+const calculateGraphScore = () => {
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   const nodeCount = keys.length;
@@ -652,7 +652,7 @@ function calculateGraphScore() {
   );
 
   return { score, nodeCount, edgeCount, density: Math.round(density * 100) / 100, categories };
-}
+};
 
 const SCORE_HISTORY_PATH = path.join(__dirname, '..', 'brain', 'graph-score-history.json');
 
@@ -660,7 +660,7 @@ const SCORE_HISTORY_PATH = path.join(__dirname, '..', 'brain', 'graph-score-hist
  * Record current graph score and return stagnation analysis.
  * Keeps last 20 scores. Returns whether the graph is stagnating.
  */
-function recordAndAnalyzeScore() {
+const recordAndAnalyzeScore = () => {
   const current = calculateGraphScore();
   let history = loadJsonFile(SCORE_HISTORY_PATH, []);
 
@@ -691,12 +691,12 @@ function recordAndAnalyzeScore() {
     recentScores,
     historyLength: history.length
   };
-}
+};
 
 /**
  * Get graph stats for planning prompt.
  */
-function getGraphStats(recentTopics = []) {
+const getGraphStats = (recentTopics = []) => {
   const graph = loadGraph();
   const nodeCount = Object.keys(graph.nodes).length;
   const edgeCount = graph.edges.length;
@@ -736,25 +736,25 @@ function getGraphStats(recentTopics = []) {
     categories: scoreAnalysis.categories,
     density: scoreAnalysis.density
   };
-}
+};
 
 /**
  * Get full graph data for API/UI.
  */
-function getGraphData() {
+const getGraphData = () => {
   return loadGraph();
-}
+};
 
 /**
  * Prune the graph: find and merge similar/duplicate keywords via LLM.
  * Sorts keywords alphabetically so similar words cluster together,
  * then asks LLM to identify duplicates in batches.
  */
-async function pruneGraph(client, onLog, options = {}) {
+const pruneGraph = async (client, onLog, options = {}) => {
   return withGraphLock(() => _pruneGraphInner(client, onLog, options));
-}
+};
 
-async function _pruneGraphInner(client, onLog, options = {}) {
+const _pruneGraphInner = async (client, onLog, options = {}) => {
   const queryOpts = options.model ? { model: options.model } : {};
   const goalPrompt = options.goalPrompt || '';
   const graph = loadGraph();
@@ -1109,13 +1109,13 @@ async function _pruneGraphInner(client, onLog, options = {}) {
 
   if (onLog) onLog('info', `Prune done: merged ${totalMerged}, removed ${totalRemoved} → ${Object.keys(graph.nodes).length} nodes remain`);
   return graph;
-}
+};
 
 /**
  * Remove JSONL entries from knowledge DB whose topic matches any of the given labels.
  * Scans brain/research/ and brain/analysis/ directories.
  */
-function cleanupKnowledgeDb(labels) {
+const cleanupKnowledgeDb = (labels) => {
   if (!labels || labels.length === 0) return 0;
   const brainDir = path.join(__dirname, '..', 'brain');
   const dirs = [path.join(brainDir, 'research'), path.join(brainDir, 'analysis')];
@@ -1157,13 +1157,13 @@ function cleanupKnowledgeDb(labels) {
     }
   }
   return removed;
-}
+};
 
 /**
  * Delete a node and its edges from the graph.
  * Also removes matching entries from the knowledge DB.
  */
-function deleteNode(key) {
+const deleteNode = (key) => {
   // Sync function — callers should avoid concurrent calls
   const graph = loadGraph();
   if (!graph.nodes[key]) return false;
@@ -1174,21 +1174,21 @@ function deleteNode(key) {
   // Clean up knowledge DB entries for this keyword
   if (label) cleanupKnowledgeDb([label]);
   return true;
-}
+};
 
-function normalizeKey(str) {
+const normalizeKey = (str) => {
   if (!str || typeof str !== 'string') return '';
   return str.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_\u3000-\u9fff\uff00-\uffef]/g, '').slice(0, 60);
-}
+};
 
 /**
  * Normalize a category string for comparison.
  * Handles slash-separated multi-categories by taking the first, and lowercases.
  */
-function normCategory(cat) {
+const normCategory = (cat) => {
   if (!cat) return '';
   return cat.split('/')[0].trim().toLowerCase();
-}
+};
 
 /**
  * Auto-connect nodes based on shared topics and same category.
@@ -1198,7 +1198,7 @@ function normCategory(cat) {
  * 1. Shared topics: if two nodes were researched under the same topic, connect them
  * 2. Same category + low connectivity: connect under-linked nodes within the same category
  */
-function autoConnect(onLog) {
+const autoConnect = (onLog) => {
   const graph = loadGraph();
   const keys = Object.keys(graph.nodes);
   if (keys.length < 2) return graph;
@@ -1288,7 +1288,7 @@ function autoConnect(onLog) {
   saveGraph(graph);
   if (onLog) onLog('info', `Auto-connect: +${addedByTopic} edges from shared topics, +${added - addedByTopic} from same category (total edges: ${graph.edges.length})`);
   return graph;
-}
+};
 
 /**
  * Strengthen connections between keyword pairs that were searched together
@@ -1297,7 +1297,7 @@ function autoConnect(onLog) {
  * @param {Array<{weak: string, strong: string}>} pairs - keyword pairs that were searched together
  * @param {string} topic - the research topic that found the connection
  */
-function strengthenSearchPairConnections(pairs, topic) {
+const strengthenSearchPairConnections = (pairs, topic) => {
   if (!pairs || pairs.length === 0) return;
   const graph = loadGraph();
   let strengthened = 0;
@@ -1333,12 +1333,12 @@ function strengthenSearchPairConnections(pairs, topic) {
 
   if (strengthened > 0) saveGraph(graph);
   return strengthened;
-}
+};
 
 /**
  * Find a node key by label (case-insensitive fuzzy match).
  */
-function findNodeKey(graph, label) {
+const findNodeKey = (graph, label) => {
   if (!label) return null;
   const key = normalizeKey(label);
   if (graph.nodes[key]) return key;
@@ -1348,6 +1348,6 @@ function findNodeKey(graph, label) {
     if ((n.label || '').toLowerCase() === lower) return k;
   }
   return null;
-}
+};
 
 module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect };

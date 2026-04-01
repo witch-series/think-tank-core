@@ -2,13 +2,7 @@
 
 const { fetch, fetchWithRetry } = require('./crawler');
 const { URL } = require('url');
-
-/**
- * Wait for specified milliseconds
- */
-const wait = (ms) => {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+const { wait } = require('../lib/utils');
 
 /**
  * Decode HTML entities in text
@@ -31,7 +25,7 @@ const decodeEntities = (text) => {
 /**
  * Search using Brave Search and extract results from HTML.
  */
-async function searchBrave(query, maxResults = 5) {
+const searchBrave = async (query, maxResults = 5) => {
   const q = encodeURIComponent(query);
   const searchUrl = `https://search.brave.com/search?q=${q}&source=web`;
 
@@ -91,7 +85,7 @@ async function searchBrave(query, maxResults = 5) {
   } catch {
     return [];
   }
-}
+};
 
 // --- DuckDuckGo Search (fallback) ---
 
@@ -99,7 +93,7 @@ async function searchBrave(query, maxResults = 5) {
  * Search DuckDuckGo HTML and extract results.
  * Uses POST method. Retries on 202 (rate limit).
  */
-async function searchDDG(query, maxResults = 5) {
+const searchDDG = async (query, maxResults = 5) => {
   const searchUrl = 'https://html.duckduckgo.com/html/';
   const formBody = 'q=' + encodeURIComponent(query);
   const headers = {
@@ -165,7 +159,7 @@ async function searchDDG(query, maxResults = 5) {
   }
 
   return results;
-}
+};
 
 // --- Source credibility scoring ---
 
@@ -230,7 +224,7 @@ const classifySource = (url) => {
  * @param {number} maxResults - Maximum number of results
  * @returns {Promise<Array<{url: string, title: string, snippet: string, credibility: number}>>}
  */
-async function searchGitHub(query, maxResults = 5) {
+const searchGitHub = async (query, maxResults = 5) => {
   const q = encodeURIComponent(query);
   const searchUrl = `https://github.com/search?q=${q}&type=repositories`;
 
@@ -289,7 +283,7 @@ async function searchGitHub(query, maxResults = 5) {
   } catch {
     return [];
   }
-}
+};
 
 // --- Combined search with fallback ---
 
