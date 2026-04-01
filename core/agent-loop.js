@@ -409,16 +409,18 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       collectedData.push({
         type: 'arxiv_papers',
         source: `arxiv: ${englishQuery.slice(0, 60)}`,
-        content: papers.map(p => `- ${p.title}: ${(p.summary || '').slice(0, 300)}`).join('\n')
+        content: papers.map(p => `- ${p.title}: ${(p.summary || '').slice(0, 600)}`).join('\n')
       });
 
-      for (const paper of papers.slice(0, 2)) {
+      for (const paper of papers.slice(0, 3)) {
         if (paper.url && !visitedUrls.has(paper.url)) {
+          // Use abs URL for richer HTML content
+          const absUrl = paper.url.replace('/pdf/', '/abs/').replace(/\.pdf$/, '');
           pagesToFetch.push({
-            url: paper.url,
+            url: absUrl,
             title: paper.title,
             type: 'arxiv_page',
-            maxLen: 4000,
+            maxLen: 6000,
             credibility: 1.0,
             sourceType: 'academic'
           });
@@ -710,8 +712,16 @@ const gatherDevelop = async (client, taskDescription, repoPath, workLogDir, onLo
       prompt += `最初のアクションをJSON形式で返してください。\n`;
     }
 
-    const response = await client.query(prompt, systemPrompt, { model: options.model });
-    const action = parseAction((response.response || '').trim());
+    let response = await client.query(prompt, systemPrompt, { model: options.model });
+    let action = parseAction((response.response || '').trim());
+
+    // If parsing failed, retry once with explicit JSON-only instruction
+    if (!action) {
+      onLog('debug', 'Dev action parse failed, retrying with JSON reminder');
+      const retryPrompt = prompt + '\n\n前回の応答がJSONとして解析できませんでした。説明文なしでJSON形式のみで回答してください。例: {"action": "read_file", "path": "brain/"}';
+      response = await client.query(retryPrompt, systemPrompt, { model: options.model });
+      action = parseAction((response.response || '').trim());
+    }
 
     if (!action) {
       consecutiveFailures++;
@@ -816,14 +826,27 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
 
   onLog('info', `Summarizing ${collectedData.length} sources...`);
 
-  let response;
-  try {
-    response = await client.query(prompt);
-  } catch (e) {
-    onLog('warn', `Summarize LLM call failed: ${e.message}`);
-    return { summary: 'Summary generation failed due to LLM error', insights: [] };
+  // Retry up to 2 times on LLM failure
+  const MAX_SUMMARIZE_RETRIES = 2;
+  let responseText = '';
+
+  for (let attempt = 1; attempt <= MAX_SUMMARIZE_RETRIES; attempt++) {
+    try {
+      const response = await client.query(prompt);
+      responseText = (response.response || '').trim();
+      break;
+    } catch (e) {
+      onLog('warn', `Summarize LLM call failed (attempt ${attempt}/${MAX_SUMMARIZE_RETRIES}): ${e.message}`);
+      if (attempt === MAX_SUMMARIZE_RETRIES) {
+        onLog('warn', 'Summarization failed after retries, discarding');
+        return { summary: '', insights: [], empty: true };
+      }
+    }
   }
-  const responseText = (response.response || '').trim();
+
+  if (!responseText) {
+    return { summary: '', insights: [], empty: true };
+  }
 
   // Try to parse JSON (with or without "action" field)
   const obj = parseJsonSafe(responseText);
@@ -834,12 +857,16 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
     };
   }
 
-  // Last resort: use the raw response as both summary and insight
-  onLog('debug', `Summary JSON parse failed, using raw text: ${responseText.slice(0, 80)}`);
-  return {
-    summary: responseText.slice(0, 300),
-    insights: [responseText.slice(0, 500)]
-  };
+  // Last resort: use the raw response as summary if it looks like content (not error/garbage)
+  if (responseText.length > 20 && !/^[\s\{\[<]/.test(responseText)) {
+    return {
+      summary: responseText.slice(0, 300),
+      insights: [responseText.slice(0, 500)]
+    };
+  }
+
+  onLog('debug', `Summary parse failed, discarding: ${responseText.slice(0, 80)}`);
+  return { summary: '', insights: [], empty: true };
 }
 
 // --- Main entry point ---
@@ -889,10 +916,15 @@ const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => 
 
   // Phase 2: Summarize
   onLog('info', 'Agent Phase 2: Summarizing...');
-  const { summary, insights } = await summarizeFindings(
+  const summarizeResult = await summarizeFindings(
     client, taskDescription, collectedData, onLog
   );
-  onLog('info', `Summary complete: ${insights.length} insights`);
+  const { summary, insights } = summarizeResult;
+  if (summarizeResult.empty) {
+    onLog('info', 'Summary empty (LLM failed or no data), skipping persistence');
+  } else {
+    onLog('info', `Summary complete: ${insights.length} insights`);
+  }
 
   // Extract source URLs from collected data
   const sourceUrls = [];
@@ -914,23 +946,27 @@ const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => 
   const finalResult = {
     summary,
     insights,
+    empty: summarizeResult.empty || false,
     sources: [...new Set(sourceUrls)],
     visitedUrls: gatherResult.visitedUrls || [],
     credibilityMap,
-    dataSourceCount: collectedData.length
+    dataSourceCount: collectedData.length,
+    executedActions: executedActions || []
   };
 
-  // Save work log
-  if (!fs.existsSync(workLogDir)) fs.mkdirSync(workLogDir, { recursive: true });
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const logFile = path.join(workLogDir, `${timestamp}_agent-result.json`);
-  const safeResult = JSON.parse(sanitizeText(JSON.stringify({
-    task: taskDescription.slice(0, 200),
-    summary: finalResult.summary,
-    insights: finalResult.insights,
-    sources: collectedData.map(d => d.source)
-  })));
-  fs.writeFileSync(logFile, JSON.stringify(safeResult, null, 2), 'utf-8');
+  // Save work log (skip if summary was empty/failed)
+  if (!summarizeResult.empty) {
+    if (!fs.existsSync(workLogDir)) fs.mkdirSync(workLogDir, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const logFile = path.join(workLogDir, `${timestamp}_agent-result.json`);
+    const safeResult = JSON.parse(sanitizeText(JSON.stringify({
+      task: taskDescription.slice(0, 200),
+      summary: finalResult.summary,
+      insights: finalResult.insights,
+      sources: collectedData.map(d => d.source)
+    })));
+    fs.writeFileSync(logFile, JSON.stringify(safeResult, null, 2), 'utf-8');
+  }
 
   return finalResult;
 }

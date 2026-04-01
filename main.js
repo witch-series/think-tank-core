@@ -118,6 +118,8 @@ const saveChatMessage = (role, text) => {
 // --- Chat Report: generate context-aware investigation reports ---
 
 const postChatReport = (client, topic, findings) => {
+  // Skip posting when findings are empty/failed
+  if (findings && findings.empty) return;
   // Fire-and-forget: generate a report that references chat history
   (async () => {
     try {
@@ -380,8 +382,9 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
       if (result.empty) return;
 
       // Save the supplementary research
-      const hasData = (result.insights && result.insights.length > 0) ||
-                      (result.summary && result.summary.length > 10);
+      const hasData = !result.empty &&
+                      ((result.insights && result.insights.length > 0) ||
+                       (result.summary && result.summary.length > 10));
       if (hasData) {
         saveKnowledge(path.resolve(ROOT, 'brain', 'research'), 'research', {
           topic: parsed.searchQuery.slice(0, 50),
@@ -629,7 +632,9 @@ const scheduleAutonomousTasks = () => {
     }
 
     // If LLM chose an action type that has been unreliable, fall back
-    if (isActionUnreliable(action) && action !== 'research' && action !== 'idle') {
+    // Use wider window for develop/execute to avoid permanently blocking code generation
+    const unreliableWindow = (action === 'develop' || action === 'execute') ? 10 : 5;
+    if (isActionUnreliable(action, unreliableWindow) && action !== 'research' && action !== 'idle') {
       log('info', `Action "${action}" has high failure rate, falling back to research`);
       action = 'research';
     }
@@ -674,8 +679,9 @@ const scheduleAutonomousTasks = () => {
             break;
           }
 
-          const hasData = (result.insights && result.insights.length > 0) ||
-                          (result.summary && result.summary.length > 10);
+          const hasData = !result.empty &&
+                          ((result.insights && result.insights.length > 0) ||
+                           (result.summary && result.summary.length > 10));
           if (hasData) {
             setPhase('saving', 'Research results');
             const entry = {
@@ -733,8 +739,12 @@ const scheduleAutonomousTasks = () => {
             model: ollamaClient.model
           });
 
-          const devHasData = (result.insights && result.insights.length > 0) ||
-                             (result.summary && result.summary.length > 10);
+          const devHasData = !result.empty &&
+                             ((result.insights && result.insights.length > 0) ||
+                              (result.summary && result.summary.length > 10));
+          // Count as success if tools were actually executed (even if summary failed)
+          const devDidWork = Array.isArray(result.executedActions) && result.executedActions.length > 0;
+          if (devDidWork) actionSuccess = true;
           if (devHasData) {
             saveKnowledge(analysisDbPath, 'development', {
               topic: devTask.slice(0, 50),
@@ -871,8 +881,9 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
               workLogDir, onLog: log, mode: 'analyze', targetFolders: folders
             });
 
-            const hasData = (result.insights && result.insights.length > 0) ||
-                            (result.summary && result.summary.length > 10);
+            const hasData = !result.empty &&
+                            ((result.insights && result.insights.length > 0) ||
+                             (result.summary && result.summary.length > 10));
             if (hasData) {
               saveKnowledge(analysisDbPath, 'analysis', {
                 topic: 'コードベース解析',
@@ -954,8 +965,9 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
           if (curiosityResult.visitedUrls && curiosityResult.visitedUrls.length > 0) {
             addVisitedUrls(curiosityResult.visitedUrls, curiosityResult.credibilityMap);
           }
-          const hasData = (curiosityResult.insights && curiosityResult.insights.length > 0) ||
-                          (curiosityResult.summary && curiosityResult.summary.length > 10);
+          const hasData = !curiosityResult.empty &&
+                          ((curiosityResult.insights && curiosityResult.insights.length > 0) ||
+                           (curiosityResult.summary && curiosityResult.summary.length > 10));
           if (hasData) {
             saveKnowledge(researchDbPath, 'curiosity', {
               topic: curiosity.topic.slice(0, 50),
@@ -1184,8 +1196,9 @@ const startServer = (port) => {
           if (result.visitedUrls && result.visitedUrls.length > 0) {
             addVisitedUrls(result.visitedUrls, result.credibilityMap);
           }
-          const hasData = (result.insights && result.insights.length > 0) ||
-                          (result.summary && result.summary.length > 10);
+          const hasData = !result.empty &&
+                          ((result.insights && result.insights.length > 0) ||
+                           (result.summary && result.summary.length > 10));
           if (hasData) {
             saveKnowledge(path.resolve(ROOT, 'brain', 'research'), 'research', {
               topic: topic.slice(0, 50),
