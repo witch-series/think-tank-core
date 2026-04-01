@@ -1082,7 +1082,10 @@
           playBtn.className = 'tts-play-btn';
           playBtn.textContent = '\u25B6';
           playBtn.title = 'Read aloud (VOICEVOX)';
-          playBtn.onclick = function() { playTTS(text, playBtn); };
+          playBtn.onclick = function() {
+            if (currentTTSBtn === playBtn && currentAudio) { stopTTS(); return; }
+            playTTS(text, playBtn);
+          };
           bubble.appendChild(playBtn);
           if (!skipAutoPlay) {
             const settings = loadVoiceSettings();
