@@ -354,6 +354,12 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
           sources: result.sources || []
         });
         log('info', `Supplementary research saved: ${(result.insights || []).length} insights for user query`);
+
+        // Notify user in chat that additional research completed
+        const supplementSummary = result.summary
+          ? `先ほどの質問について追加調査しました。\n\n${result.summary.slice(0, 400)}`
+          : `先ほどの質問について追加調査しました。${(result.insights || []).length}件の新しい知見を取得しました。`;
+        saveChatMessage('system', supplementSummary);
       }
     } catch (e) {
       log('debug', `Supplement search failed: ${e.message}`);
@@ -485,17 +491,19 @@ const scheduleAutonomousTasks = () => {
 
     if (goalText && goalText !== 'なし') {
       try {
-        await decomposeGoal(ollamaClient, goalText, {
-          knowledgeCount: context.knowledgeCount,
-          moduleCount,
-          graphNodeCount: graphStats.nodeCount,
-          existingFiles: context.functionList
-        }, { goalPrompt: goalText });
-
-        // Periodically re-evaluate goal progress
+        // Run decomposition and evaluation in parallel when both are needed
+        const goalPromises = [
+          decomposeGoal(ollamaClient, goalText, {
+            knowledgeCount: context.knowledgeCount,
+            moduleCount,
+            graphNodeCount: graphStats.nodeCount,
+            existingFiles: context.functionList
+          }, { goalPrompt: goalText })
+        ];
         if (cycleCount % 5 === 0) {
-          await evaluateProgress(ollamaClient, { goalPrompt: goalText });
+          goalPromises.push(evaluateProgress(ollamaClient, { goalPrompt: goalText }));
         }
+        await Promise.all(goalPromises);
 
         goalSummary = getGoalSummary();
         const { subtask } = getNextSubtask();
@@ -648,19 +656,27 @@ const scheduleAutonomousTasks = () => {
             actionSuccess = true;
             actionReason = `${(result.insights || []).length} insights`;
 
-            updateGraph(ollamaClient, entry).catch(e =>
-              log('warn', `Graph update failed: ${e.message}`)
-            );
+            // Post research summary to chat as system message
+            const chatSummary = result.summary
+              ? `${topic || searchPrompt.slice(0, 40)} の調査が完了しました。${(result.insights || []).length}件の知見を取得しました。\n\n${result.summary.slice(0, 400)}`
+              : `${topic || searchPrompt.slice(0, 40)} の調査が完了しました。${(result.insights || []).length}件の知見を取得しました。`;
+            saveChatMessage('system', chatSummary);
 
-            // Strengthen connections between keyword pairs that were searched together
+            // Run graph update and connection strengthening in parallel (fire-and-forget)
+            const graphPromises = [
+              updateGraph(ollamaClient, entry).catch(e =>
+                log('warn', `Graph update failed: ${e.message}`)
+              )
+            ];
             if (searchPairs.length > 0) {
-              try {
-                const strengthened = strengthenSearchPairConnections(searchPairs, topic || searchPrompt.slice(0, 50));
-                if (strengthened > 0) log('info', `Strengthened ${strengthened} keyword pair connections from combined search`);
-              } catch (e) {
-                log('debug', `Connection strengthening failed: ${e.message}`);
-              }
+              graphPromises.push(
+                Promise.resolve().then(() => {
+                  const strengthened = strengthenSearchPairConnections(searchPairs, topic || searchPrompt.slice(0, 50));
+                  if (strengthened > 0) log('info', `Strengthened ${strengthened} keyword pair connections from combined search`);
+                }).catch(e => log('debug', `Connection strengthening failed: ${e.message}`))
+              );
             }
+            Promise.all(graphPromises).catch(() => {});
           }
           actionResult = result;
           break;
@@ -697,6 +713,9 @@ const scheduleAutonomousTasks = () => {
               sources: result.sources || []
             });
             actionSuccess = true;
+
+            // Post dev summary to chat
+            saveChatMessage('system', `開発タスク「${devTask.slice(0, 40)}」が完了しました。\n\n${(result.summary || '').slice(0, 400)}`);
             actionReason = result.summary ? result.summary.slice(0, 100) : 'completed';
           }
           actionResult = result;
@@ -729,8 +748,10 @@ const scheduleAutonomousTasks = () => {
         case 'organize': {
           setPhase('organizing', 'Compressing knowledge');
           log('info', 'Organizing knowledge...');
-          const r1 = await compressKnowledge(ollamaClient, researchDbPath);
-          const r2 = await compressKnowledge(ollamaClient, analysisDbPath);
+          const [r1, r2] = await Promise.all([
+            compressKnowledge(ollamaClient, researchDbPath),
+            compressKnowledge(ollamaClient, analysisDbPath)
+          ]);
           const total = [...(r1.compressed || []), ...(r2.compressed || [])];
           if (total.length > 0) {
             log('info', `Compressed: ${total.map(c => `${c.file} ${c.before}→${c.after}`).join(', ')}`);
@@ -832,6 +853,9 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
               log('info', `Analysis saved: ${(result.insights || []).length} findings`);
               actionSuccess = true;
               actionReason = `${(result.insights || []).length} findings`;
+
+              // Post analysis summary to chat
+              saveChatMessage('system', `コードベース解析が完了しました。${(result.insights || []).length}件の発見がありました。\n\n${(result.summary || '').slice(0, 400)}`);
             }
             actionResult = result;
           }
@@ -911,6 +935,9 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
             });
             updateGraph(ollamaClient, { topic: curiosity.topic, insights: curiosityResult.insights || [], summary: curiosityResult.summary || '' })
               .catch(e => log('warn', `Curiosity graph update failed: ${e.message}`));
+
+            // Post curiosity result to chat
+            saveChatMessage('system', `「${curiosity.topic.slice(0, 40)}」について調べました。${(curiosityResult.insights || []).length}件の知見を取得しました。\n\n${(curiosityResult.summary || '').slice(0, 400)}`);
           }
           markCuriosityExplored(curiosity.topic);
         } catch (e) {

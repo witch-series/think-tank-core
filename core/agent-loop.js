@@ -495,20 +495,21 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
     const urlObj = parseJsonSafe((urlResponse.response || '').trim());
 
     if (urlObj && urlObj.urls && Array.isArray(urlObj.urls)) {
-      for (const url of urlObj.urls.slice(0, 4)) {
-        if (!url || !url.startsWith('http')) continue;
-        if (visitedUrls.has(url)) continue;
-
-        onLog('info', `Direct fetch: ${url.slice(0, 80)}`);
-        const page = await fetchPage(url, 4000);
-        newlyVisited.push(url);
-
-        if (page.text && page.text.length > 100) {
-          collectedData.push({
-            type: 'web_page',
-            source: url.slice(0, 80),
-            content: page.text.slice(0, 3000)
-          });
+      const urlsToFetch = urlObj.urls.slice(0, 4).filter(url => url && url.startsWith('http') && !visitedUrls.has(url));
+      if (urlsToFetch.length > 0) {
+        onLog('info', `Direct fetch (parallel): ${urlsToFetch.length} URLs`);
+        const pages = await Promise.all(
+          urlsToFetch.map(url => fetchPage(url, 4000).catch(() => ({ url, text: '' })))
+        );
+        for (let i = 0; i < urlsToFetch.length; i++) {
+          newlyVisited.push(urlsToFetch[i]);
+          if (pages[i].text && pages[i].text.length > 100) {
+            collectedData.push({
+              type: 'web_page',
+              source: urlsToFetch[i].slice(0, 80),
+              content: pages[i].text.slice(0, 3000)
+            });
+          }
         }
       }
     }
