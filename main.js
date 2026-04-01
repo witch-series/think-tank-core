@@ -22,7 +22,7 @@ const { parseJsonSafe } = require('./lib/json-parser');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
-const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect } = require('./core/knowledge-graph');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect, searchGraphNodes } = require('./core/knowledge-graph');
 const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
 const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
@@ -1181,13 +1181,68 @@ const startServer = (port) => {
           return;
         }
 
-        // Gather all available knowledge for context
+        // Gather knowledge relevant to the user's question
         const recentResearch = getNewKnowledge(path.resolve(ROOT, 'brain', 'research'), 72);
         const recentAnalysis = getNewKnowledge(path.resolve(ROOT, 'brain', 'analysis'), 72);
-        const recentKnowledge = [...recentResearch, ...recentAnalysis];
-        const knowledgeSummary = recentKnowledge.slice(-10).map(k =>
-          `[${k.topic || 'unknown'}] ${JSON.stringify(k.insights || k).slice(0, 300)}`
-        ).join('\n');
+        const allKnowledge = [...recentResearch, ...recentAnalysis];
+
+        // Extract keywords from user message for relevance matching
+        const msgLower = message.toLowerCase();
+        const msgKeywords = message.replace(/[?？。、！!,.]/g, ' ').split(/\s+/).filter(w => w.length >= 2);
+
+        // Score each knowledge entry by relevance to the question
+        const scored = allKnowledge.map(k => {
+          const topic = (k.topic || '').toLowerCase();
+          const summaryText = (k.summary || '').toLowerCase();
+          const insightsText = Array.isArray(k.insights)
+            ? k.insights.map(i => typeof i === 'string' ? i : JSON.stringify(i)).join(' ').toLowerCase()
+            : '';
+          const fullText = topic + ' ' + summaryText + ' ' + insightsText;
+
+          let score = 0;
+          for (const kw of msgKeywords) {
+            const kwLower = kw.toLowerCase();
+            if (topic.includes(kwLower)) score += 3;
+            if (summaryText.includes(kwLower)) score += 2;
+            if (insightsText.includes(kwLower)) score += 1;
+          }
+          return { entry: k, score };
+        });
+
+        // Take relevant entries first, then recent ones as fallback
+        scored.sort((a, b) => b.score - a.score);
+        const relevant = scored.filter(s => s.score > 0).slice(0, 8).map(s => s.entry);
+        const recent = scored.filter(s => s.score === 0).slice(-4).map(s => s.entry);
+        const selectedKnowledge = [...relevant, ...recent];
+
+        // Format knowledge entries in readable text (not raw JSON)
+        const formatEntry = (k) => {
+          const parts = [`### ${k.topic || 'unknown'}`];
+          if (k.summary) parts.push(k.summary.slice(0, 500));
+          if (Array.isArray(k.insights) && k.insights.length > 0) {
+            const insightTexts = k.insights.map(i => typeof i === 'string' ? i : (i.insight || i.finding || JSON.stringify(i)));
+            parts.push(insightTexts.slice(0, 5).join('\n'));
+          }
+          if (Array.isArray(k.sources) && k.sources.length > 0) {
+            parts.push('出典: ' + k.sources.slice(0, 3).join(', '));
+          }
+          return parts.join('\n');
+        };
+        let knowledgeSummary = selectedKnowledge.map(formatEntry).join('\n\n');
+
+        // Also search knowledge graph for related context
+        if (msgKeywords.length > 0) {
+          const graphNodes = searchGraphNodes(msgKeywords);
+          if (graphNodes.length > 0) {
+            const graphContext = graphNodes.map(n => {
+              let line = `- ${n.label}`;
+              if (n.description) line += `: ${n.description.slice(0, 100)}`;
+              if (n.neighbors.length > 0) line += ` (関連: ${n.neighbors.slice(0, 5).join(', ')})`;
+              return line;
+            }).join('\n');
+            knowledgeSummary += '\n\n## ナレッジグラフの関連キーワード:\n' + graphContext;
+          }
+        }
 
         // If user is asking about the system itself, include documentation
         let systemDocsContext = '';

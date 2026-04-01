@@ -1350,4 +1350,44 @@ const findNodeKey = (graph, label) => {
   return null;
 };
 
-module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect };
+/**
+ * Search the knowledge graph for nodes matching any of the given keywords.
+ * Returns matched node labels and their connected neighbors for context.
+ */
+const searchGraphNodes = (keywords) => {
+  if (!keywords || keywords.length === 0) return [];
+  const graph = loadGraph();
+  const nodes = Object.entries(graph.nodes);
+  if (nodes.length === 0) return [];
+
+  const lowerKeywords = keywords.map(k => k.toLowerCase());
+  const matched = [];
+
+  for (const [key, node] of nodes) {
+    const label = (node.label || '').toLowerCase();
+    const desc = (node.description || '').toLowerCase();
+    const hit = lowerKeywords.some(kw => label.includes(kw) || desc.includes(kw) || kw.includes(label));
+    if (!hit) continue;
+
+    // Find connected nodes
+    const neighbors = [];
+    for (const edge of graph.edges) {
+      if (edge.from === key && graph.nodes[edge.to]) {
+        neighbors.push(graph.nodes[edge.to].label || edge.to);
+      } else if (edge.to === key && graph.nodes[edge.from]) {
+        neighbors.push(graph.nodes[edge.from].label || edge.from);
+      }
+    }
+
+    matched.push({
+      label: node.label || key,
+      description: node.description || '',
+      category: node.category || '',
+      neighbors: [...new Set(neighbors)].slice(0, 10)
+    });
+  }
+
+  return matched.slice(0, 20);
+};
+
+module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect, searchGraphNodes };
