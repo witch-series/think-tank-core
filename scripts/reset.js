@@ -21,7 +21,7 @@ function clearDir(dirPath) {
   return count;
 }
 
-const dirs = ['brain/research', 'brain/analysis', 'brain/work-logs', 'brain/modules', 'brain/scripts', 'brain/output'];
+const dirs = ['brain/research', 'brain/analysis', 'brain/work-logs', 'brain/modules', 'brain/scripts', 'brain/output', 'brain/knowledge-db'];
 
 for (const dir of dirs) {
   const absPath = path.resolve(ROOT, dir);
@@ -29,11 +29,29 @@ for (const dir of dirs) {
   console.log(`Cleared: ${dir} (${count} files)`);
 }
 
-for (const file of ['brain/visited-urls.json', 'brain/chat-history.json', 'brain/knowledge-graph.json', 'brain/graph-score-history.json', 'brain/goals.json', 'brain/feedback.json']) {
+const filesToClear = [
+  'brain/visited-urls.json', 'brain/chat-history.json',
+  'brain/knowledge-graph.json', 'brain/graph-score-history.json',
+  'brain/goals.json', 'brain/feedback.json', 'brain/curiosities.json'
+];
+
+for (const file of filesToClear) {
   const absPath = path.resolve(ROOT, file);
   if (fs.existsSync(absPath)) {
     fs.unlinkSync(absPath);
     console.log('Cleared: ' + file);
+  }
+}
+
+// Clear LLM-generated files in brain/ root (but not subdirectories or .gitkeep)
+const brainRoot = path.resolve(ROOT, 'brain');
+if (fs.existsSync(brainRoot)) {
+  for (const file of fs.readdirSync(brainRoot)) {
+    const filePath = path.join(brainRoot, file);
+    if (fs.statSync(filePath).isFile() && file !== '.gitkeep' && !filesToClear.some(f => f.endsWith(file))) {
+      fs.unlinkSync(filePath);
+      console.log('Cleared: brain/' + file);
+    }
   }
 }
 
