@@ -74,16 +74,16 @@ const loadSystemDocs = () => {
 }
 
 const isSystemQuestion = (message) => {
+  // Only match questions specifically about THIS system (Think Tank), not general topics
   const patterns = [
-    /このシステム/, /think.?tank/, /仕組み/, /アーキテクチャ/,
-    /どう(やって|動い|なって)/, /機能/, /セキュリティ/,
-    /ゴール分解/, /フィードバック/, /ナレッジグラフ/,
-    /エージェント/, /サンドボックス/, /検閲/,
-    /dream\s*phase/i, /設定/, /API/, /使い方/,
-    /コマンド/, /モード/, /ツール/, /プロンプト/,
-    /自律/, /開発モード/, /リサーチモード/,
-    /how does/i, /what is/i, /explain/i, /architecture/i,
-    /security/i, /how.*work/i, /設計/, /構造/,
+    /このシステム/, /think.?tank/i, /仕組み.*(システム|think)/i,
+    /システム.*(アーキテクチャ|仕組み|構造|設計)/,
+    /ゴール分解/, /フィードバック.*(機能|システム)/, /ナレッジグラフ/,
+    /サンドボックス/, /検閲/,
+    /dream\s*phase/i, /システム.*設定/, /API.*(使い方|仕様)/,
+    /自律.*(モード|サイクル|タスク)/, /開発モード/, /リサーチモード/,
+    /think.?tank.*(how|what|explain)/i, /how does this (system|work)/i,
+    /what is this (system|tool)/i,
   ];
   return patterns.some(p => p.test(message));
 }
