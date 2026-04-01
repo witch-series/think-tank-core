@@ -383,7 +383,7 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       collectedData.push({
         type: 'search_results',
         source: queries[i],
-        content: searchResults.map(r => `- [${r.type || 'web'}:${r.credibility || 0.5}] ${r.title}: ${r.snippet}`).join('\n')
+        content: searchResults.map(r => `- ${r.title}: ${r.snippet || ''}`).join('\n')
       });
 
       for (const result of searchResults) {
@@ -409,7 +409,7 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       collectedData.push({
         type: 'arxiv_papers',
         source: `arxiv: ${englishQuery.slice(0, 60)}`,
-        content: papers.map(p => `- [${p.title}] ${(p.summary || '').slice(0, 300)} (${p.url})`).join('\n')
+        content: papers.map(p => `- ${p.title}: ${(p.summary || '').slice(0, 300)}`).join('\n')
       });
 
       for (const paper of papers.slice(0, 2)) {
@@ -435,7 +435,7 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       collectedData.push({
         type: 'github_repos',
         source: `github: ${englishQuery.slice(0, 60)}`,
-        content: repos.map(r => `- [${r.title}] ${r.snippet || ''} (${r.url})`).join('\n')
+        content: repos.map(r => `- ${r.title}: ${r.snippet || ''}`).join('\n')
       });
 
       for (const repo of repos.slice(0, 2)) {
@@ -476,7 +476,8 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       if (page.text && page.text.length > 100) {
         collectedData.push({
           type: meta.type,
-          source: `[${meta.sourceType}] ${(meta.title || '').slice(0, 60)} (${meta.url.slice(0, 60)})`,
+          source: `[${meta.sourceType}] ${(meta.title || meta.url.split('/').slice(2, 4).join('/')).slice(0, 60)}`,
+          url: meta.url,
           content: page.text.slice(0, 3000),
           credibility: meta.credibility,
           sourceType: meta.sourceType
@@ -779,13 +780,25 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
     return { summary: '', insights: [], empty: true };
   }
 
+  // Prioritize actual page content over search result metadata (links)
+  // Sort: fetched pages first, then arxiv/github content, search result listings last
+  const contentPriority = { web_page: 0, arxiv_page: 0, github_page: 0, code_analysis: 1, git_history: 1, arxiv_papers: 2, github_repos: 2, search_results: 3 };
+  const sorted = [...collectedData].sort((a, b) =>
+    (contentPriority[a.type] ?? 1) - (contentPriority[b.type] ?? 1)
+  );
+
   // Build the data section, keeping total size manageable
   let dataSection = '';
   let totalLen = 0;
   const maxDataLen = 6000;
 
-  for (const d of collectedData) {
-    const entry = `\n### ${d.source}\n${d.content}\n`;
+  for (const d of sorted) {
+    // For search_results type, only include a brief mention, not the full link list
+    let content = d.content;
+    if (d.type === 'search_results') {
+      content = content.slice(0, 300);
+    }
+    const entry = `\n### ${d.source}\n${content}\n`;
     if (totalLen + entry.length > maxDataLen) {
       const remaining = maxDataLen - totalLen;
       if (remaining > 200) dataSection += entry.slice(0, remaining) + '\n...\n';
@@ -884,6 +897,7 @@ const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => 
   // Extract source URLs from collected data
   const sourceUrls = [];
   for (const d of collectedData) {
+    if (d.url) { sourceUrls.push(d.url); continue; }
     const urlMatch = (d.source || '').match(/https?:\/\/[^\s)]+/);
     if (urlMatch) sourceUrls.push(urlMatch[0]);
   }
@@ -892,8 +906,8 @@ const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => 
   const credibilityMap = {};
   for (const d of collectedData) {
     if (d.credibility !== undefined) {
-      const urlMatch = (d.source || '').match(/https?:\/\/[^\s)]+/);
-      if (urlMatch) credibilityMap[urlMatch[0]] = d.credibility;
+      const url = d.url || ((d.source || '').match(/https?:\/\/[^\s)]+/) || [])[0];
+      if (url) credibilityMap[url] = d.credibility;
     }
   }
 
