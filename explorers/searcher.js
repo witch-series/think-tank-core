@@ -36,7 +36,7 @@ const searchBrave = async (query, maxResults = 5) => {
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8'
       },
-      timeout: 20000
+      timeout: 10000
     });
 
     if (res.status !== 200) return [];
@@ -107,7 +107,7 @@ const searchDDG = async (query, maxResults = 5) => {
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(searchUrl, { method: 'POST', headers, body: formBody, timeout: 15000 });
+      const res = await fetch(searchUrl, { method: 'POST', headers, body: formBody, timeout: 10000 });
 
       if (res.status === 200 && res.body.includes('result__a')) {
         html = res.body;
@@ -116,12 +116,12 @@ const searchDDG = async (query, maxResults = 5) => {
 
       if (res.status === 202 || !res.body.includes('result__a')) {
         if (attempt < 3) {
-          await wait(attempt * 2000);
+          await wait(attempt * 1000);
           continue;
         }
       }
     } catch {
-      if (attempt < 3) await wait(attempt * 2000);
+      if (attempt < 3) await wait(attempt * 1000);
     }
   }
 
@@ -235,7 +235,7 @@ const searchGitHub = async (query, maxResults = 5) => {
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9'
       },
-      timeout: 20000
+      timeout: 10000
     });
 
     if (res.status !== 200) return [];
@@ -295,12 +295,12 @@ const searchGitHub = async (query, maxResults = 5) => {
  * @returns {Promise<Array<{url: string, title: string, snippet: string, credibility: number}>>}
  */
 const searchWeb = async (query, maxResults = 5) => {
-  // Try Brave first
-  let results = await searchBrave(query, maxResults);
-  if (results.length === 0) {
-    // Fallback to DuckDuckGo
-    results = await searchDDG(query, maxResults);
-  }
+  // Run Brave and DDG in parallel, use Brave results if available, else DDG
+  const [braveResults, ddgResults] = await Promise.all([
+    searchBrave(query, maxResults).catch(() => []),
+    searchDDG(query, maxResults).catch(() => [])
+  ]);
+  const results = braveResults.length > 0 ? braveResults : ddgResults;
 
   // Attach credibility scores and filter out blocked sources
   return results.map(r => ({
@@ -320,7 +320,7 @@ const fetchPage = async (pageUrl, maxLength = 6000) => {
         'Accept': 'text/html,text/plain,application/json',
         'Accept-Language': 'ja,en;q=0.9'
       },
-      timeout: 20000
+      timeout: 12000
     });
 
     if (res.status !== 200) return { url: pageUrl, error: `HTTP ${res.status}` };

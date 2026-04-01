@@ -412,13 +412,13 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
         content: papers.map(p => `- [${p.title}] ${(p.summary || '').slice(0, 300)} (${p.url})`).join('\n')
       });
 
-      for (const paper of papers.slice(0, 3)) {
+      for (const paper of papers.slice(0, 2)) {
         if (paper.url && !visitedUrls.has(paper.url)) {
           pagesToFetch.push({
             url: paper.url,
             title: paper.title,
             type: 'arxiv_page',
-            maxLen: 6000,
+            maxLen: 4000,
             credibility: 1.0,
             sourceType: 'academic'
           });

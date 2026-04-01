@@ -115,6 +115,42 @@ const saveChatMessage = (role, text) => {
   }
 }
 
+// --- Chat Report: generate context-aware investigation reports ---
+
+const postChatReport = (client, topic, findings) => {
+  // Fire-and-forget: generate a report that references chat history
+  (async () => {
+    try {
+      const history = loadChatHistory();
+      // Take last 10 messages for context (keep token usage low)
+      const recentChat = history.slice(-10).map(m =>
+        `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text.slice(0, 200)}`
+      ).join('\n');
+
+      const findingsText = typeof findings === 'string' ? findings
+        : `トピック: ${topic}\n${findings.summary || ''}\n${
+            Array.isArray(findings.insights)
+              ? findings.insights.map(i => typeof i === 'string' ? i : (i.insight || i.finding || JSON.stringify(i))).slice(0, 5).join('\n')
+              : ''
+          }`;
+
+      const prompt = `## 最近のチャット履歴:\n${recentChat || '(履歴なし)'}\n\n## 調査結果:\n${findingsText.slice(0, 1500)}\n\n上記のチャット履歴の文脈を踏まえて、調査結果をユーザーに報告してください。`;
+      const systemPrompt = loadPrompt('chat-report.system');
+      const response = await client.query(prompt, systemPrompt);
+      const reply = (response.response || '').trim();
+      if (reply && reply.length > 10) {
+        saveChatMessage('assistant', reply);
+      }
+    } catch (e) {
+      // Fallback: post raw summary if LLM fails
+      const fallback = typeof findings === 'string' ? findings
+        : `${topic}の調査が完了しました。${(findings.summary || '').slice(0, 300)}`;
+      saveChatMessage('system', fallback);
+      log('debug', `Chat report generation failed: ${e.message}`);
+    }
+  })();
+};
+
 // --- Curiosity System ---
 const CURIOSITIES_PATH = path.join(ROOT, 'brain', 'curiosities.json');
 const MAX_CURIOSITIES = 100;
@@ -355,11 +391,8 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
         });
         log('info', `Supplementary research saved: ${(result.insights || []).length} insights for user query`);
 
-        // Notify user in chat that additional research completed
-        const supplementSummary = result.summary
-          ? `先ほどの質問について追加調査しました。\n\n${result.summary.slice(0, 400)}`
-          : `先ほどの質問について追加調査しました。${(result.insights || []).length}件の新しい知見を取得しました。`;
-        saveChatMessage('system', supplementSummary);
+        // Notify user in chat with context-aware report
+        postChatReport(client, parsed.searchQuery, result);
       }
     } catch (e) {
       log('debug', `Supplement search failed: ${e.message}`);
@@ -656,11 +689,8 @@ const scheduleAutonomousTasks = () => {
             actionSuccess = true;
             actionReason = `${(result.insights || []).length} insights`;
 
-            // Post research summary to chat as system message
-            const chatSummary = result.summary
-              ? `${topic || searchPrompt.slice(0, 40)} の調査が完了しました。${(result.insights || []).length}件の知見を取得しました。\n\n${result.summary.slice(0, 400)}`
-              : `${topic || searchPrompt.slice(0, 40)} の調査が完了しました。${(result.insights || []).length}件の知見を取得しました。`;
-            saveChatMessage('system', chatSummary);
+            // Post context-aware research report to chat
+            postChatReport(ollamaClient, topic || searchPrompt.slice(0, 40), result);
 
             // Run graph update and connection strengthening in parallel (fire-and-forget)
             const graphPromises = [
@@ -714,8 +744,8 @@ const scheduleAutonomousTasks = () => {
             });
             actionSuccess = true;
 
-            // Post dev summary to chat
-            saveChatMessage('system', `開発タスク「${devTask.slice(0, 40)}」が完了しました。\n\n${(result.summary || '').slice(0, 400)}`);
+            // Post context-aware dev report to chat
+            postChatReport(ollamaClient, devTask.slice(0, 40), result);
             actionReason = result.summary ? result.summary.slice(0, 100) : 'completed';
           }
           actionResult = result;
@@ -854,8 +884,8 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
               actionSuccess = true;
               actionReason = `${(result.insights || []).length} findings`;
 
-              // Post analysis summary to chat
-              saveChatMessage('system', `コードベース解析が完了しました。${(result.insights || []).length}件の発見がありました。\n\n${(result.summary || '').slice(0, 400)}`);
+              // Post context-aware analysis report to chat
+              postChatReport(ollamaClient, 'コードベース解析', result);
             }
             actionResult = result;
           }
@@ -936,8 +966,8 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
             updateGraph(ollamaClient, { topic: curiosity.topic, insights: curiosityResult.insights || [], summary: curiosityResult.summary || '' })
               .catch(e => log('warn', `Curiosity graph update failed: ${e.message}`));
 
-            // Post curiosity result to chat
-            saveChatMessage('system', `「${curiosity.topic.slice(0, 40)}」について調べました。${(curiosityResult.insights || []).length}件の知見を取得しました。\n\n${(curiosityResult.summary || '').slice(0, 400)}`);
+            // Post context-aware curiosity report to chat
+            postChatReport(ollamaClient, curiosity.topic.slice(0, 40), curiosityResult);
           }
           markCuriosityExplored(curiosity.topic);
         } catch (e) {

@@ -116,7 +116,7 @@ const fetchWithRetry = async (urlString, options = {}, maxRetries = 3) => {
     } catch (err) {
       const isRetryable = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN'].includes(err.code);
       if (!isRetryable || attempt === maxRetries) throw err;
-      const delay = attempt * 3000;
+      const delay = attempt * 1500;
       if (options.onRetry) options.onRetry(attempt, maxRetries, err, delay);
       await wait(delay);
     }
