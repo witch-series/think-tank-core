@@ -49,45 +49,6 @@ const log = (level, message, data) => {
   }
 };
 
-// --- System Documentation for Chat ---
-const DOCS_DIR = path.join(ROOT, 'docs');
-
-const loadSystemDocs = () => {
-  const docFiles = ['architecture.md', 'technical-specs.md', 'directory-structure.md'];
-  const docs = [];
-  for (const file of docFiles) {
-    const filePath = path.join(DOCS_DIR, file);
-    try {
-      if (fs.existsSync(filePath)) {
-        docs.push(`### ${file}\n${fs.readFileSync(filePath, 'utf-8')}`);
-      }
-    } catch {}
-  }
-  // Also include README
-  const readmePath = path.join(ROOT, 'README.md');
-  try {
-    if (fs.existsSync(readmePath)) {
-      docs.push(`### README.md\n${fs.readFileSync(readmePath, 'utf-8')}`);
-    }
-  } catch {}
-  return docs.join('\n\n---\n\n');
-}
-
-const isSystemQuestion = (message) => {
-  // Only match questions specifically about THIS system (Think Tank), not general topics
-  const patterns = [
-    /このシステム/, /think.?tank/i, /仕組み.*(システム|think)/i,
-    /システム.*(アーキテクチャ|仕組み|構造|設計)/,
-    /ゴール分解/, /フィードバック.*(機能|システム)/, /ナレッジグラフ/,
-    /サンドボックス/, /検閲/,
-    /dream\s*phase/i, /システム.*設定/, /API.*(使い方|仕様)/,
-    /自律.*(モード|サイクル|タスク)/, /開発モード/, /リサーチモード/,
-    /think.?tank.*(how|what|explain)/i, /how does this (system|work)/i,
-    /what is this (system|tool)/i,
-  ];
-  return patterns.some(p => p.test(message));
-}
-
 // --- Chat History ---
 const CHAT_HISTORY_PATH = path.join(ROOT, 'brain', 'chat-history.json');
 const MAX_CHAT_HISTORY = 200;
@@ -1286,20 +1247,12 @@ const startServer = (port) => {
           }
         }
 
-        // If user is asking about the system itself, include documentation
-        let systemDocsContext = '';
-        if (isSystemQuestion(message)) {
-          systemDocsContext = loadSystemDocs();
-          log('debug', 'Including system documentation in chat context');
-        }
-
-        // Immediate response from existing knowledge
+        // Immediate response from existing knowledge (research-focused only)
         log('info', `User chat: ${message.slice(0, 80)}`);
         saveChatMessage('user', message);
         try {
           const reply = await chat(ollamaClient, message, {
-            knowledge: knowledgeSummary,
-            systemDocs: systemDocsContext
+            knowledge: knowledgeSummary
           });
 
           saveChatMessage('assistant', reply);

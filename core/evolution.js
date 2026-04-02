@@ -424,11 +424,8 @@ const chat = async (client, userMessage, context) => {
   const systemPrompt = context?.systemPrompt || loadPrompt('chat.system');
 
   const parts = [];
-  if (context?.systemDocs) {
-    parts.push(`## このシステムのドキュメント:\n${context.systemDocs}`);
-  }
   if (context?.knowledge) {
-    parts.push(`## システムの知識:\n${context.knowledge}`);
+    parts.push(`## 調査結果・知識:\n${context.knowledge}`);
   }
   parts.push(`## ユーザーの質問:\n${userMessage}`);
 
