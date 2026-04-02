@@ -319,7 +319,7 @@ const fetchPage = async (pageUrl, maxLength = 6000) => {
         'Accept': 'text/html,text/plain,application/json',
         'Accept-Language': 'ja,en;q=0.9'
       },
-      timeout: 8000
+      timeout: 20000
     });
 
     if (res.status !== 200) return { url: pageUrl, error: `HTTP ${res.status}` };

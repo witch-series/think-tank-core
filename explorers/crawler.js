@@ -6,7 +6,7 @@ const { URL } = require('url');
 const { wait } = require('../lib/utils');
 
 const MAX_REDIRECTS = 5;
-const DEFAULT_TIMEOUT = 15000;
+const DEFAULT_TIMEOUT = 30000;
 
 const fetch = (urlString, options = {}) => {
   const maxRedirects = options.maxRedirects ?? MAX_REDIRECTS;
@@ -95,7 +95,7 @@ const fetch = (urlString, options = {}) => {
       req.on('error', reject);
       req.on('timeout', () => {
         req.destroy();
-        reject(new Error('Request timed out'));
+        reject(new Error(`Web fetch timed out: ${currentUrl}`));
       });
 
       if (body) {

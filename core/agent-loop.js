@@ -346,7 +346,10 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
   const [immediateResults, queryResponse] = await Promise.all([
     Promise.all(immediateSearches),
     client.query(queryPrompt).catch(e => {
-      onLog('warn', `Query generation LLM call failed: ${e.message}`);
+      const isTimeout = /timed? ?out|timeout/i.test(e.message);
+      onLog('warn', isTimeout
+        ? `Query generation LLM timed out — continuing with default queries`
+        : `Query generation LLM call failed: ${e.message}`);
       return { response: '' };
     })
   ]);
@@ -484,16 +487,29 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       const meta = toFetch[i];
       newlyVisited.push(meta.url);
 
-      if (page.text && page.text.length > 100) {
+      if (page.error || !page.text || page.text.length <= 100) {
+        // Mark failed URLs with zero credibility so they are deprioritized
+        meta.credibility = 0;
         collectedData.push({
           type: meta.type,
-          source: `[${meta.sourceType}] ${(meta.title || meta.url.split('/').slice(2, 4).join('/')).slice(0, 60)}`,
+          source: meta.url,
           url: meta.url,
-          content: page.text.slice(0, 3000),
-          credibility: meta.credibility,
+          content: '',
+          credibility: 0,
           sourceType: meta.sourceType
         });
+        onLog('debug', `Fetch failed, marking URL as low-credibility: ${meta.url.slice(0, 80)}`);
+        continue;
       }
+
+      collectedData.push({
+        type: meta.type,
+        source: `[${meta.sourceType}] ${(meta.title || meta.url.split('/').slice(2, 4).join('/')).slice(0, 60)}`,
+        url: meta.url,
+        content: page.text.slice(0, 3000),
+        credibility: meta.credibility,
+        sourceType: meta.sourceType
+      });
     }
   }
 
@@ -860,9 +876,17 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
   // Try to parse JSON (with or without "action" field)
   const obj = parseJsonSafe(responseText);
   if (obj && (obj.summary || obj.insights)) {
+    // Detect negative/failure summaries — treat as empty so they aren't persisted
+    const negativePatterns = /取得できなかった|情報は見つからなかった|情報が得られなかった|有用な情報はなかった|具体的な(情報|データ|知見)は.*な(い|かった)/;
+    const summaryText = (obj.summary || '').trim();
+    const insightsList = Array.isArray(obj.insights) ? obj.insights : [];
+    if (summaryText && negativePatterns.test(summaryText) && insightsList.length === 0) {
+      onLog('debug', `Negative summary detected, discarding: ${summaryText.slice(0, 60)}`);
+      return { summary: '', insights: [], empty: true };
+    }
     return {
-      summary: obj.summary || '',
-      insights: Array.isArray(obj.insights) ? obj.insights : []
+      summary: summaryText,
+      insights: insightsList
     };
   }
 
@@ -923,10 +947,11 @@ const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => 
   const { collectedData, executedActions } = gatherResult;
   onLog('info', `Gathered ${collectedData.length} sources in ${executedActions.length} steps`);
 
-  // Phase 2: Summarize
+  // Phase 2: Summarize (exclude entries with no content, e.g. failed fetches)
   onLog('info', 'Agent Phase 2: Summarizing...');
+  const validData = collectedData.filter(d => d.content && d.content.length > 0);
   const summarizeResult = await summarizeFindings(
-    client, taskDescription, collectedData, onLog
+    client, taskDescription, validData, onLog
   );
   const { summary, insights } = summarizeResult;
   if (summarizeResult.empty) {
