@@ -76,37 +76,60 @@ const saveChatMessage = (role, text) => {
   }
 }
 
-// --- Chat Report: generate context-aware investigation reports ---
+// --- Chat Report: buffered batch reporting ---
+// Accumulate findings and report periodically instead of after every action.
+// Flushes when: buffer reaches REPORT_BATCH_SIZE, or REPORT_INTERVAL_MS elapses.
 
-const postChatReport = (client, topic, findings) => {
-  // Skip posting when findings are empty/failed
+const REPORT_BATCH_SIZE = 3;
+const REPORT_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+let reportBuffer = [];
+let reportTimer = null;
+
+const bufferChatReport = (topic, findings) => {
   if (findings && findings.empty) return;
-  // Fire-and-forget: generate a report that references chat history
+  const findingsText = typeof findings === 'string' ? findings
+    : `${findings.summary || ''}\n${
+        Array.isArray(findings.insights)
+          ? findings.insights.map(i => typeof i === 'string' ? i : (i.insight || i.finding || JSON.stringify(i))).slice(0, 5).join('\n')
+          : ''
+      }`;
+  reportBuffer.push({ topic, text: findingsText.trim(), timestamp: new Date().toISOString() });
+
+  // Flush if buffer is full
+  if (reportBuffer.length >= REPORT_BATCH_SIZE) {
+    flushChatReport();
+  } else if (!reportTimer) {
+    // Start timer for partial buffer flush
+    reportTimer = setTimeout(flushChatReport, REPORT_INTERVAL_MS);
+  }
+};
+
+const flushChatReport = () => {
+  if (reportTimer) { clearTimeout(reportTimer); reportTimer = null; }
+  if (reportBuffer.length === 0 || !ollamaClient) return;
+  const items = reportBuffer.splice(0);
+  // Fire-and-forget
   (async () => {
     try {
       const history = loadChatHistory();
-      // Take last 10 messages for context (keep token usage low)
       const recentChat = history.slice(-10).map(m =>
         `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text.slice(0, 200)}`
       ).join('\n');
 
-      const findingsText = typeof findings === 'string' ? findings
-        : `トピック: ${topic}\n${findings.summary || ''}\n${
-            Array.isArray(findings.insights)
-              ? findings.insights.map(i => typeof i === 'string' ? i : (i.insight || i.finding || JSON.stringify(i))).slice(0, 5).join('\n')
-              : ''
-          }`;
+      // Format all buffered findings
+      const findingsSummary = items.map((item, i) =>
+        `### 調査${i + 1}: ${item.topic}\n${item.text.slice(0, 800)}`
+      ).join('\n\n');
 
-      const prompt = `## 最近のチャット履歴:\n${recentChat || '(履歴なし)'}\n\n## 調査結果:\n${findingsText.slice(0, 1500)}\n\n上記のチャット履歴の文脈を踏まえて、調査結果をユーザーに報告してください。`;
+      const prompt = `## 最近のチャット履歴:\n${recentChat || '(履歴なし)'}\n\n## 最近の調査結果（${items.length}件）:\n${findingsSummary.slice(0, 3000)}\n\n上記の複数の調査結果を横断的に分析し、特に新しい発見や重要な知見をまとめてユーザーに報告してください。既知の情報の繰り返しではなく、新たに分かったことや意外な関連性に焦点を当ててください。全ての調査を個別に報告する必要はありません。本当に報告する価値のある発見だけを簡潔に伝えてください。`;
       const systemPrompt = loadPrompt('chat-report.system');
-      const response = await client.query(prompt, systemPrompt);
+      const response = await ollamaClient.query(prompt, systemPrompt);
       const reply = (response.response || '').trim();
       if (reply && reply.length > 10) {
         saveChatMessage('assistant', reply);
       }
     } catch (e) {
-      // Do not post fallback to chat — avoid noisy/duplicate messages
-      log('debug', `Chat report generation failed: ${e.message}`);
+      log('debug', `Batch chat report failed: ${e.message}`);
     }
   })();
 };
@@ -355,7 +378,7 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
         log('info', `Supplementary research saved: ${(result.insights || []).length} insights for user query`);
 
         // Notify user in chat with context-aware report
-        postChatReport(client, parsed.searchQuery, result);
+        bufferChatReport(parsed.searchQuery, result);
       }
     } catch (e) {
       log('debug', `Supplement search failed: ${e.message}`);
@@ -660,7 +683,7 @@ const scheduleAutonomousTasks = () => {
             actionReason = `${(result.insights || []).length} insights`;
 
             // Post context-aware research report to chat
-            postChatReport(ollamaClient, topic || searchPrompt.slice(0, 40), result);
+            bufferChatReport(topic || searchPrompt.slice(0, 40), result);
 
             // Run graph update and connection strengthening in parallel (fire-and-forget)
             const graphPromises = [
@@ -719,7 +742,7 @@ const scheduleAutonomousTasks = () => {
             actionSuccess = true;
 
             // Post context-aware dev report to chat
-            postChatReport(ollamaClient, devTask.slice(0, 40), result);
+            bufferChatReport(devTask.slice(0, 40), result);
             actionReason = result.summary ? result.summary.slice(0, 100) : 'completed';
           }
           actionResult = result;
@@ -860,7 +883,7 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
               actionReason = `${(result.insights || []).length} findings`;
 
               // Post context-aware analysis report to chat
-              postChatReport(ollamaClient, 'コードベース解析', result);
+              bufferChatReport('コードベース解析', result);
             }
             actionResult = result;
           }
@@ -943,7 +966,7 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
               .catch(e => log('warn', `Curiosity graph update failed: ${e.message}`));
 
             // Post context-aware curiosity report to chat
-            postChatReport(ollamaClient, curiosity.topic.slice(0, 40), curiosityResult);
+            bufferChatReport(curiosity.topic.slice(0, 40), curiosityResult);
           }
           markCuriosityExplored(curiosity.topic);
         } catch (e) {
@@ -1443,6 +1466,7 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
 const shutdown = () => {
   return new Promise((resolve) => {
     restarting = true;
+    flushChatReport(); // flush any buffered reports before shutdown
     taskManager.stop();
 
     if (analyzeLoop) { analyzeLoop.stop(); analyzeLoop = null; }
