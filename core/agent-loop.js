@@ -322,8 +322,18 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       '\n※ 孤立したキーワードではなく、複数キーワードを組み合わせて関連性を発見するクエリにしてください。';
   }
 
-  // Step 1: Ask LLM for search queries based on the task
-  onLog('info', 'Generating search queries...');
+  // Step 1+2: Start immediate search with task description while LLM generates better queries
+  const defaultQuery = taskDescription.slice(0, 80);
+  const defaultEnglish = taskDescription.replace(/[^\x20-\x7E]/g, '').trim();
+
+  // Fire immediate searches using task description (don't wait for LLM)
+  const immediateSearches = [searchWeb(defaultQuery, 5).catch(() => [])];
+  if (defaultEnglish.length >= 3) {
+    immediateSearches.push(searchArxiv(defaultEnglish, 5).catch(() => []));
+    immediateSearches.push(searchGitHub(defaultEnglish, 3).catch(() => []));
+  }
+
+  // Simultaneously ask LLM for refined search queries
   const queryPrompt = fillPrompt('search-queries.user', {
     taskDescription,
     visitedNote,
@@ -332,57 +342,58 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
     keywordPairsNote
   });
 
-  let queryResponse;
-  try {
-    queryResponse = await client.query(queryPrompt);
-  } catch (e) {
-    onLog('warn', `Query generation LLM call failed: ${e.message}`);
-    queryResponse = { response: '' };
-  }
-  const queryText = (queryResponse.response || '').trim();
+  onLog('info', 'Searching with task description + generating LLM queries in parallel...');
+  const [immediateResults, queryResponse] = await Promise.all([
+    Promise.all(immediateSearches),
+    client.query(queryPrompt).catch(e => {
+      onLog('warn', `Query generation LLM call failed: ${e.message}`);
+      return { response: '' };
+    })
+  ]);
 
-  let queries = [];
+  // Parse LLM queries
+  const queryText = (queryResponse.response || '').trim();
+  let llmQueries = [];
   const parsed = parseJsonSafe(queryText);
   if (parsed && parsed.queries && Array.isArray(parsed.queries)) {
-    queries = parsed.queries.slice(0, 3);
+    llmQueries = parsed.queries.slice(0, 3).filter(q => q !== defaultQuery);
   }
 
-  // Fallback: if LLM failed to generate queries, extract keywords from task
-  if (queries.length === 0) {
-    onLog('debug', 'Query generation failed, using task description as query');
-    queries = [taskDescription.slice(0, 80)];
+  // Run additional LLM-generated queries (if any new ones)
+  let additionalResults = [];
+  if (llmQueries.length > 0) {
+    onLog('info', `Running ${llmQueries.length} additional LLM-refined searches...`);
+    additionalResults = await Promise.all(
+      llmQueries.map(q => searchWeb(q, 5).catch(() => []))
+    );
   }
 
-  // Step 2: Execute searches in parallel, then batch-fetch pages
-  let totalSearchResults = 0;
+  // Merge all search results
+  // immediateResults: [webDefault, arxiv?, github?]  additionalResults: [webLlm1, ...]
+  const hasEnglish = defaultEnglish.length >= 3;
+  const englishQuery = hasEnglish ? defaultEnglish : '';
 
-  // Run all web searches + arxiv + github concurrently
-  const englishQuery = queries.map(q => q.replace(/[^\x20-\x7E]/g, '').trim())
-    .find(q => q.length >= 3) || taskDescription.replace(/[^\x20-\x7E]/g, '').trim();
-
-  const searchPromises = queries.map(q => searchWeb(q, 5).catch(() => []));
-  if (englishQuery && englishQuery.length >= 3) {
-    searchPromises.push(searchArxiv(englishQuery, 5).catch(() => []));
-    searchPromises.push(searchGitHub(englishQuery, 3).catch(() => []));
+  // Separate web results from arxiv/github
+  const webResultSets = [immediateResults[0] || []]; // first immediate is always web
+  const arxivResults = hasEnglish ? (immediateResults[1] || []) : [];
+  const githubResults = hasEnglish ? (immediateResults[2] || []) : [];
+  for (const r of additionalResults) {
+    webResultSets.push(r);
   }
-
-  onLog('info', `Searching ${searchPromises.length} sources in parallel (web + arxiv + github)...`);
-  const searchResultSets = await Promise.all(searchPromises);
+  const queries = [defaultQuery, ...llmQueries];
 
   // Collect search results and URLs to fetch
   const pagesToFetch = [];
-  const hasGitHub = englishQuery && englishQuery.length >= 3;
-  const hasArxiv = englishQuery && englishQuery.length >= 3;
-  const webResultCount = queries.length;
+  let totalSearchResults = 0;
 
-  for (let i = 0; i < webResultCount && i < searchResultSets.length; i++) {
-    const searchResults = searchResultSets[i];
+  for (let i = 0; i < webResultSets.length; i++) {
+    const searchResults = webResultSets[i];
     totalSearchResults += searchResults.length;
 
     if (searchResults.length > 0) {
       collectedData.push({
         type: 'search_results',
-        source: queries[i],
+        source: queries[i] || defaultQuery,
         content: searchResults.map(r => `- ${r.title}: ${r.snippet || ''}`).join('\n')
       });
 
@@ -402,9 +413,8 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
   }
 
   // Handle arxiv results
-  if (hasArxiv) {
-    const arxivIdx = webResultCount;
-    const papers = searchResultSets[arxivIdx] || [];
+  if (hasEnglish) {
+    const papers = arxivResults;
     if (papers.length > 0) {
       collectedData.push({
         type: 'arxiv_papers',
@@ -430,9 +440,8 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
   }
 
   // Handle GitHub results
-  if (hasGitHub) {
-    const ghIdx = webResultCount + (hasArxiv ? 1 : 0);
-    const repos = searchResultSets[ghIdx] || [];
+  if (hasEnglish) {
+    const repos = githubResults;
     if (repos.length > 0) {
       collectedData.push({
         type: 'github_repos',
