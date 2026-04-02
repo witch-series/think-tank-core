@@ -130,7 +130,9 @@ const flushChatReport = () => {
       const prompt = `## 最近のチャット履歴:\n${recentChat || '(履歴なし)'}\n\n## 過去の報告済み内容（これらと重複する内容は絶対に報告しないでください）:\n${alreadyReported.slice(0, 2000) || '(なし)'}\n\n## 最近の調査結果（${items.length}件）:\n${findingsSummary.slice(0, 3000)}\n\n上記の調査結果のうち、「過去の報告済み内容」にまだ含まれていない新しい発見だけを報告してください。既に報告した内容を繰り返してはいけません。全て既知であれば「新しい発見はありませんでした」と一言だけ返してください。`;
       const systemPrompt = loadPrompt('chat-report.system');
       const response = await ollamaClient.query(prompt, systemPrompt);
-      const reply = (response.response || '').trim();
+      let reply = (response.response || '').trim();
+      // Strip any file name/path references that the LLM may have included
+      reply = reply.replace(/[A-Za-z0-9_\-]+\.(txt|json|jsonl|csv|md|js|py|yaml|yml|xml|bak|log|tmp)\b/gi, '').replace(/\s{2,}/g, ' ').trim();
       // Skip trivial/no-news replies
       if (reply && reply.length > 10 && !/^新しい発見はありませんでした/.test(reply)) {
         saveChatMessage('assistant', reply);
@@ -1285,9 +1287,11 @@ const startServer = (port) => {
         log('info', `User chat: ${message.slice(0, 80)}`);
         saveChatMessage('user', message);
         try {
-          const reply = await chat(ollamaClient, message, {
+          let reply = await chat(ollamaClient, message, {
             knowledge: knowledgeSummary
           });
+          // Strip any file name/path references
+          reply = reply.replace(/[A-Za-z0-9_\-]+\.(txt|json|jsonl|csv|md|js|py|yaml|yml|xml|bak|log|tmp)\b/gi, '').replace(/\s{2,}/g, ' ').trim();
 
           saveChatMessage('assistant', reply);
 
