@@ -110,6 +110,14 @@ const isGenericLabel = (label) => {
   return false;
 };
 
+/**
+ * Check if a node still has information sources backing it.
+ * Nodes with sources should be protected from deletion.
+ */
+const hasSources = (node) => {
+  return Array.isArray(node.sources) && node.sources.length > 0;
+};
+
 const loadGraph = () => {
   return loadJsonFile(GRAPH_PATH, { nodes: {}, edges: [], processedTimestamps: [] });
 };
@@ -356,7 +364,7 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
       }
     }
 
-    // Remove nodes flagged by LLM
+    // Remove nodes flagged by LLM — but protect nodes that have information sources
     let nodeRemoveCount = 0;
     const removeNodes = Array.isArray(result.remove) ? result.remove : [];
     if (removeNodes.length > 0) {
@@ -364,6 +372,10 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
       for (const label of removeNodes) {
         const key = normalizeKey(label);
         if (key && graph.nodes[key]) {
+          if (hasSources(graph.nodes[key])) {
+            if (onLog) onLog('debug', `Graph review: protected "${label}" (has sources)`);
+            continue;
+          }
           delete graph.nodes[key];
           removedKeys.add(key);
           nodeRemoveCount++;
@@ -913,6 +925,10 @@ const _pruneGraphInner = async (client, onLog, options = {}) => {
     for (const label of removes) {
       const key = normalizeKey(label);
       if (key && graph.nodes[key]) {
+        if (hasSources(graph.nodes[key])) {
+          if (onLog) onLog('debug', `Prune: protected "${label}" (has sources)`);
+          continue;
+        }
         removedLabels.push(graph.nodes[key].label || label);
         delete graph.nodes[key];
         removedKeys.add(key);
@@ -946,45 +962,24 @@ const _pruneGraphInner = async (client, onLog, options = {}) => {
     }
   }
 
-  const now = Date.now();
   const autoRemoveKeys = new Set();
   for (const k of currentKeys) {
     const node = graph.nodes[k];
     if (!node) continue;
     const label = (node.label || k).trim();
-    const conn = edgeCountsPre[k] || 0;
-    const organicConn = organicEdgeCounts[k] || 0;
-    const count = node.count || 1;
-    const ageDays = (now - new Date(node.lastUpdated || node.firstSeen || now).getTime()) / (1000 * 60 * 60 * 24);
 
-    // Remove: generic/junk via shared filter
+    // Remove: generic/junk via shared filter (regardless of sources)
     if (isGenericLabel(label)) {
       autoRemoveKeys.add(k);
       continue;
     }
-    // Remove: isolated nodes with very short labels (likely fragments)
-    if (count <= 1 && conn === 0 && label.length <= 3 && !/[A-Z]{2,}/.test(label)) {
-      autoRemoveKeys.add(k);
-      continue;
-    }
-    // Remove: count=1 nodes with no organic connections (only auto-generated edges)
-    // These are one-off keywords that were never independently confirmed
-    if (count <= 1 && organicConn === 0) {
-      autoRemoveKeys.add(k);
-      continue;
-    }
-    // Remove: old stale nodes — low count + few connections + not updated in 30+ days
-    if (ageDays > 30 && count <= 2 && conn <= 1) {
-      autoRemoveKeys.add(k);
-      continue;
-    }
-    // Remove: very old nodes with no meaningful engagement (60+ days, never re-visited)
-    if (ageDays > 60 && count <= 1) {
-      autoRemoveKeys.add(k);
-      continue;
-    }
-    // Remove: low-count nodes with only weak connections
-    if (count <= 1 && conn <= 2 && (node.importance || 1) <= 1) {
+
+    // Protect: nodes that have information sources are kept
+    if (hasSources(node)) continue;
+
+    // Only remove source-less nodes that are also clearly junk fragments
+    const conn = edgeCountsPre[k] || 0;
+    if (conn === 0 && label.length <= 3 && !/[A-Z]{2,}/.test(label)) {
       autoRemoveKeys.add(k);
       continue;
     }
