@@ -112,20 +112,27 @@ const flushChatReport = () => {
   (async () => {
     try {
       const history = loadChatHistory();
-      const recentChat = history.slice(-10).map(m =>
+      // Include enough history to detect what was already reported
+      const assistantMessages = history
+        .filter(m => m.role === 'assistant')
+        .slice(-10)
+        .map(m => m.text.slice(0, 300));
+      const recentChat = history.slice(-6).map(m =>
         `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text.slice(0, 200)}`
       ).join('\n');
+      const alreadyReported = assistantMessages.join('\n');
 
       // Format all buffered findings
       const findingsSummary = items.map((item, i) =>
         `### 調査${i + 1}: ${item.topic}\n${item.text.slice(0, 800)}`
       ).join('\n\n');
 
-      const prompt = `## 最近のチャット履歴:\n${recentChat || '(履歴なし)'}\n\n## 最近の調査結果（${items.length}件）:\n${findingsSummary.slice(0, 3000)}\n\n上記の複数の調査結果を横断的に分析し、特に新しい発見や重要な知見をまとめてユーザーに報告してください。既知の情報の繰り返しではなく、新たに分かったことや意外な関連性に焦点を当ててください。全ての調査を個別に報告する必要はありません。本当に報告する価値のある発見だけを簡潔に伝えてください。`;
+      const prompt = `## 最近のチャット履歴:\n${recentChat || '(履歴なし)'}\n\n## 過去の報告済み内容（これらと重複する内容は絶対に報告しないでください）:\n${alreadyReported.slice(0, 2000) || '(なし)'}\n\n## 最近の調査結果（${items.length}件）:\n${findingsSummary.slice(0, 3000)}\n\n上記の調査結果のうち、「過去の報告済み内容」にまだ含まれていない新しい発見だけを報告してください。既に報告した内容を繰り返してはいけません。全て既知であれば「新しい発見はありませんでした」と一言だけ返してください。`;
       const systemPrompt = loadPrompt('chat-report.system');
       const response = await ollamaClient.query(prompt, systemPrompt);
       const reply = (response.response || '').trim();
-      if (reply && reply.length > 10) {
+      // Skip trivial/no-news replies
+      if (reply && reply.length > 10 && !/^新しい発見はありませんでした/.test(reply)) {
         saveChatMessage('assistant', reply);
       }
     } catch (e) {
