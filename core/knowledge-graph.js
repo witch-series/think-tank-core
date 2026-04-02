@@ -241,11 +241,14 @@ const _updateGraphInner = async (client, entry) => {
     addOrStrengthEdge(normalizeKey(rel.from), normalizeKey(rel.to), rel.relation);
   }
 
-  // Auto-connect: keywords from the same research that have proven value (count >= 3)
-  // Only connect established keywords to avoid shielding one-off noise from pruning
+  // Auto-connect: keywords from the same research entry
+  // For small graphs (< 80 nodes), connect all co-occurring keywords to bootstrap edges
+  // For larger graphs, require count >= 3 to avoid shielding one-off noise from pruning
+  const nodeCount = Object.keys(graph.nodes).length;
+  const minAutoCount = nodeCount < 80 ? 1 : 3;
   const acceptedKeys = keywords
     .map(kw => normalizeKey(kw.keyword))
-    .filter(k => k && graph.nodes[k] && (graph.nodes[k].count || 1) >= 3);
+    .filter(k => k && graph.nodes[k] && (graph.nodes[k].count || 1) >= minAutoCount);
 
   // Limit to top 8 keys to prevent O(n²) edge explosion
   const limitedKeys = acceptedKeys.slice(0, 8);
@@ -1219,12 +1222,13 @@ const autoConnect = (onLog) => {
     return true;
   }
 
-  // Filter: only connect nodes that have proven value (count >= 3)
-  // count is the only reliable quality signal — importance is inflated by LLM
-  // This prevents low-quality nodes from gaining connections that shield them from pruning
+  // Filter: only connect nodes that have proven value
+  // For small graphs (< 80 nodes), lower the threshold so edges can form during early growth
+  // For larger graphs, require count >= 3 to prevent low-quality nodes from gaining protective connections
+  const minCount = keys.length < 80 ? 1 : 3;
   const qualityKeys = keys.filter(k => {
     const node = graph.nodes[k];
-    return (node.count || 1) >= 3;
+    return (node.count || 1) >= minCount;
   });
 
   // --- Strategy 1: Shared topics ---

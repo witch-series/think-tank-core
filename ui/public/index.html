@@ -1107,10 +1107,10 @@
       timeEl.className = 'chat-time';
       if (timestamp) {
         const d = new Date(timestamp);
-        timeEl.textContent = d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+        timeEl.textContent = d.toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit' }) + ' ' + d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
       } else {
         const now = new Date();
-        timeEl.textContent = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+        timeEl.textContent = now.toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit' }) + ' ' + now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
       }
 
       const content = document.createElement('div');
