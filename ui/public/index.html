@@ -135,7 +135,7 @@
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
     .tts-play-btn { background: none; border: 1px solid #444; color: #bd93f9; padding: 2px 8px; margin-left: 8px; cursor: pointer; font-size: 12px; border-radius: 3px; vertical-align: middle; }
     .tts-play-btn:hover { border-color: #bd93f9; }
-    .tts-play-btn.playing { color: #50fa7b; border-color: #50fa7b; }
+    .tts-play-btn.playing { color: #ff5555; border-color: #ff5555; }
 
     /* Settings */
     .setting-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-size: 13px; }
@@ -189,7 +189,6 @@
       <div class="chat-input">
         <input type="text" id="chat-input" placeholder="メッセージを入力..." />
         <button id="chat-mic" title="音声入力 (STT)">&#x1F3A4;</button>
-        <button id="tts-stop" title="音声停止" style="display:none;background:#ff5555;border-color:#ff5555;">&#x23F9;</button>
         <button id="chat-send">Send</button>
       </div>
     </div>
@@ -443,43 +442,48 @@
       }
     }
 
-    // --- VOICEVOX TTS ---
+    // --- VOICEVOX TTS (queue-based sequential playback) ---
     let currentAudio = null;
     let currentTTSBtn = null;
+    let ttsQueue = [];       // [{text, btn}, ...] — messages waiting to play
+    let ttsPlaying = false;  // true while a message is being synthesized/played
 
-    function showTTSStop(show) {
-      var stopBtn = document.getElementById('tts-stop');
-      if (stopBtn) stopBtn.style.display = show ? 'inline-block' : 'none';
+    function resetTTSBtn(btn) {
+      if (!btn) return;
+      btn.classList.remove('playing');
+      btn.textContent = '\u25B6';
     }
 
     function stopTTS() {
+      ttsQueue = [];
+      ttsPlaying = false;
       if (currentAudio) {
         currentAudio.pause();
         if (currentAudio._objectUrl) URL.revokeObjectURL(currentAudio._objectUrl);
         currentAudio = null;
       }
       if (currentTTSBtn) {
-        currentTTSBtn.classList.remove('playing');
-        currentTTSBtn.textContent = '\u25B6';
+        resetTTSBtn(currentTTSBtn);
         currentTTSBtn = null;
       }
-      showTTSStop(false);
     }
 
-    async function playTTS(text, btn) {
-      const settings = loadVoiceSettings();
-      const voicevoxUrl = settings.voicevoxUrl;
-      const speakerId = settings.speakerId;
+    async function processNextTTS() {
+      if (ttsPlaying || ttsQueue.length === 0) return;
+      ttsPlaying = true;
+
+      const { text, btn } = ttsQueue.shift();
+      const voiceSettings = loadVoiceSettings();
+      const voicevoxUrl = voiceSettings.voicevoxUrl;
+      const speakerId = voiceSettings.speakerId;
 
       const cleanText = text.replace(/[#*`\[\]()>_~|]/g, '').replace(/\n{2,}/g, '。').replace(/\n/g, '、').trim();
-      if (!cleanText) return;
+      if (!cleanText) { ttsPlaying = false; processNextTTS(); return; }
 
-      // Stop any currently playing audio
-      stopTTS();
-
+      // Update button states
+      if (currentTTSBtn && currentTTSBtn !== btn) resetTTSBtn(currentTTSBtn);
       currentTTSBtn = btn;
-      if (btn) { btn.classList.add('playing'); btn.textContent = '...'; }
-      showTTSStop(true);
+      if (btn) { btn.classList.add('playing'); btn.textContent = '\u23F9'; }
 
       try {
         const queryRes = await fetch(voicevoxUrl + '/audio_query?text=' + encodeURIComponent(cleanText) + '&speaker=' + speakerId, {
@@ -496,21 +500,57 @@
         if (!synthRes.ok) throw new Error('synthesis failed: ' + synthRes.status);
         const audioBlob = await synthRes.blob();
 
-        if (currentAudio) { currentAudio.pause(); }
         const audioUrl = URL.createObjectURL(audioBlob);
         currentAudio = new Audio(audioUrl);
         currentAudio._objectUrl = audioUrl;
         currentAudio.onended = function() {
-          stopTTS();
+          URL.revokeObjectURL(audioUrl);
+          currentAudio = null;
+          resetTTSBtn(btn);
+          currentTTSBtn = null;
+          ttsPlaying = false;
+          processNextTTS();
         };
         currentAudio.onerror = function() {
-          stopTTS();
+          URL.revokeObjectURL(audioUrl);
+          currentAudio = null;
+          resetTTSBtn(btn);
+          currentTTSBtn = null;
+          ttsPlaying = false;
+          processNextTTS();
         };
         currentAudio.play();
       } catch (e) {
         console.error('TTS failed:', e);
-        stopTTS();
+        resetTTSBtn(btn);
+        currentTTSBtn = null;
+        ttsPlaying = false;
         showToast('音声合成に失敗しました。VOICEVOXが起動しているか確認してください。', 'error', 5000);
+      }
+    }
+
+    function enqueueTTS(text, btn) {
+      ttsQueue.push({ text, btn });
+      processNextTTS();
+    }
+
+    // Play from a specific button downward through subsequent assistant messages
+    function playFromButton(startBtn) {
+      // If this button is currently playing, stop everything
+      if (currentTTSBtn === startBtn && ttsPlaying) { stopTTS(); return; }
+
+      stopTTS();
+
+      // Find all assistant TTS buttons in order
+      var allBtns = Array.from(document.querySelectorAll('#chat-area .tts-play-btn'));
+      var startIdx = allBtns.indexOf(startBtn);
+      if (startIdx < 0) return;
+
+      // Enqueue from startBtn onward
+      for (var i = startIdx; i < allBtns.length; i++) {
+        var b = allBtns[i];
+        var t = b._ttsText;
+        if (t) enqueueTTS(t, b);
       }
     }
 
@@ -1083,15 +1123,14 @@
           playBtn.className = 'tts-play-btn';
           playBtn.textContent = '\u25B6';
           playBtn.title = 'Read aloud (VOICEVOX)';
-          playBtn.onclick = function() {
-            if (currentTTSBtn === playBtn && currentAudio) { stopTTS(); return; }
-            playTTS(text, playBtn);
-          };
+          playBtn._ttsText = text;
+          playBtn.onclick = function() { playFromButton(playBtn); };
           bubble.appendChild(playBtn);
           if (!skipAutoPlay) {
             const settings = loadVoiceSettings();
             if (settings.autoPlay) {
-              setTimeout(function() { playTTS(text, playBtn); }, 300);
+              // Queue instead of immediate play — won't interrupt current playback
+              setTimeout(function() { enqueueTTS(text, playBtn); }, 300);
             }
           }
         }
@@ -1168,8 +1207,6 @@
     chatInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') sendChat();
     });
-    document.getElementById('tts-stop').addEventListener('click', stopTTS);
-
     // --- Summary (insights/summaries) ---
     let allSummaryData = [];
 
