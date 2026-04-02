@@ -567,24 +567,28 @@ const scheduleAutonomousTasks = () => {
     // If the LLM chose research and the topic overlaps with recent topics, force a different one
     if ((action === 'research' || action === 'deep_research') && topic) {
       const topicLower = topic.toLowerCase();
+      const topicWords = topicLower.split(/[\s,、。・\-\/]+/).filter(w => w.length >= 3);
       const recent10 = recentTopics.slice(-10).map(t => t.toLowerCase());
-      const isDuplicate = recent10.some(rt =>
-        rt.includes(topicLower.slice(0, 15)) || topicLower.includes(rt.slice(0, 15))
-      );
+      // Build word set from recent topics for overlap detection
+      const recentWordSet = new Set();
+      for (const rt of recent10) {
+        for (const w of rt.split(/[\s,、。・\-\/]+/).filter(w => w.length >= 3)) recentWordSet.add(w);
+      }
+      // Duplicate if: exact match, or >50% of topic words appeared in recent searches
+      const wordOverlapCount = topicWords.filter(w => recentWordSet.has(w)).length;
+      const isDuplicate = recent10.some(rt => rt === topicLower) ||
+        (topicWords.length > 0 && wordOverlapCount / topicWords.length > 0.5);
+
       if (isDuplicate) {
         const alternatives = getUnderExplored(10, recentTopics);
-        // Pick a random alternative to avoid always choosing the top-scored one
-        const filtered = alternatives.filter(a => {
-          const aLower = a.label.toLowerCase();
-          return !recent10.some(rt => rt.includes(aLower) || aLower.includes(rt.slice(0, 15)));
-        });
-        if (filtered.length > 0) {
-          const pick = filtered[Math.floor(Math.random() * Math.min(filtered.length, 5))];
+        // Pick from top 3 scored alternatives (they're already diversity-sorted)
+        if (alternatives.length > 0) {
+          const pick = alternatives[Math.floor(Math.random() * Math.min(alternatives.length, 3))];
           const goalRef = config.finalGoal || config.searchPrompt || '';
           const goalSuffix = goalRef && goalRef !== 'なし'
             ? ` と ${goalRef.slice(0, 30)} の関連性`
             : ' の最新動向';
-          log('info', `Topic diversity: "${topic}" is repetitive, switching to "${pick.label}"`);
+          log('info', `Topic diversity: "${topic}" is repetitive (${wordOverlapCount}/${topicWords.length} word overlap), switching to "${pick.label}"`);
           topic = pick.label + goalSuffix;
           reason = `多様性確保: ${pick.label}（調査${pick.count}回/接続${pick.connections}）を優先`;
         }

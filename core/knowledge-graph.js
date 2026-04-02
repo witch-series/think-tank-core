@@ -522,7 +522,12 @@ const getUnderExplored = (limit = 10, recentTopics = []) => {
   }
 
   // Build a set of recently searched labels (lowercase) for penalty
+  // Tokenize recent topics into words for accurate matching (not substring)
   const recentLower = recentTopics.map(t => t.toLowerCase());
+  const recentWords = new Set();
+  for (const t of recentLower) {
+    for (const w of t.split(/[\s,、。・\-\/]+/).filter(w => w.length >= 3)) recentWords.add(w);
+  }
 
   const now = Date.now();
   const scored = nodes.map(([key, node]) => {
@@ -531,12 +536,22 @@ const getUnderExplored = (limit = 10, recentTopics = []) => {
     const count = node.count || 1;
     const label = (node.label || '').toLowerCase();
 
-    // Penalize keywords that appear in recent search topics
-    const recentPenalty = recentLower.some(t => t.includes(label) || label.includes(t)) ? 0.01 : 1;
-    // Penalize over-researched keywords (diminishing returns beyond 10)
-    const countPenalty = 1 / (1 + Math.log2(count));
+    // Penalize keywords that exactly match recent topics or share significant words
+    const exactMatch = recentLower.some(t => t === label || t.includes(label) && label.length >= t.length * 0.6);
+    const wordOverlap = recentWords.has(label);
+    const recentPenalty = exactMatch ? 0.005 : wordOverlap ? 0.1 : 1;
 
-    const score = (1 / (connections + 1)) * countPenalty * (1 + age / 24) * recentPenalty;
+    // Stronger penalty for over-researched keywords: exponential decay
+    // count=1: 1.0, count=3: 0.33, count=5: 0.14, count=10: 0.01
+    const countPenalty = 1 / Math.pow(count, 1.5);
+
+    // Age boost capped at 3x to prevent old over-researched nodes from dominating
+    const ageFactor = Math.min(1 + age / 48, 3);
+
+    // New edges reward: prefer nodes that will create new connections (low connectivity)
+    const connectivityBonus = 1 / (connections + 1);
+
+    const score = connectivityBonus * countPenalty * ageFactor * recentPenalty;
     return { key, label: node.label, description: node.description, category: node.category || '', count, connections, score };
   });
 
@@ -574,9 +589,13 @@ const getSuggestedSearchPairs = (limit = 3, recentTopics = []) => {
   }
 
   const recentLower = recentTopics.map(t => t.toLowerCase());
+  const recentWordsSet = new Set();
+  for (const t of recentLower) {
+    for (const w of t.split(/[\s,、。・\-\/]+/).filter(w => w.length >= 3)) recentWordsSet.add(w);
+  }
   function isRecent(k) {
     const label = (graph.nodes[k]?.label || '').toLowerCase();
-    return recentLower.some(t => t.includes(label) || label.includes(t));
+    return recentLower.some(t => t === label || t.includes(label) && label.length >= t.length * 0.6);
   }
 
   // Separate weak (0-2 edges) and strong (3+ edges), excluding recently searched
@@ -642,13 +661,21 @@ const calculateGraphScore = () => {
   const cats = new Set(keys.map(k => graph.nodes[k].category).filter(Boolean));
   const categories = cats.size;
 
+  // Breadth penalty: heavily researched keywords contribute less (diminishing returns)
+  // A node researched 1x = 10 pts, 5x = 4.5 pts, 10x = 3.2 pts, 50x = 1.5 pts
+  let nodeScore = 0;
+  for (const k of keys) {
+    const count = graph.nodes[k].count || 1;
+    nodeScore += 10 / Math.sqrt(count);
+  }
+
   // Score formula: weighted combination
-  // - Nodes contribute linearly (10 pts each)
+  // - Nodes contribute with diminishing returns for over-researched keywords
   // - Edges contribute (5 pts each, encourages connections)
   // - Density bonus (up to 50 pts, encourages well-connected graph)
   // - Category diversity bonus (20 pts per category, encourages breadth)
   const score = Math.round(
-    nodeCount * 10 +
+    nodeScore +
     edgeCount * 5 +
     Math.min(density, 5) * 10 +
     categories * 20
