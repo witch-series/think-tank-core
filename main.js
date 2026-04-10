@@ -511,6 +511,14 @@ const scheduleAutonomousTasks = () => {
     const context = collectContext();
     const graphStats = getGraphStats(recentTopics);
 
+    // Collect active user curiosities (unexplored, from user_chat)
+    const activeCuriosities = loadCuriosities()
+      .filter(c => !c.explored && c.source === 'user_chat')
+      .map(c => c.topic);
+    const userCuriosityStr = activeCuriosities.length > 0
+      ? activeCuriosities.map(t => t.slice(0, 80)).join(' / ')
+      : '';
+
     // Goal decomposition: break goal into subtasks if needed
     const goalText = config.finalGoal || config.searchPrompt || '';
     let goalSummary = null;
@@ -574,7 +582,8 @@ const scheduleAutonomousTasks = () => {
       topKeywords: graphStats.topKeywords || 'なし',
       underExplored: graphStats.underExplored || 'なし',
       searchSuggestions: graphStats.searchSuggestions || 'なし',
-      overResearched: graphStats.overResearched || 'なし'
+      overResearched: graphStats.overResearched || 'なし',
+      userCuriosities: userCuriosityStr || 'なし'
     });
 
     let action = 'research'; // fallback
@@ -596,8 +605,9 @@ const scheduleAutonomousTasks = () => {
     }
 
     // --- Topic diversity enforcement ---
+    // Skip diversity enforcement when user curiosities are pending (user intent takes priority)
     // If the LLM chose research and the topic overlaps with recent topics, force a different one
-    if ((action === 'research' || action === 'deep_research') && topic) {
+    if ((action === 'research' || action === 'deep_research') && topic && activeCuriosities.length === 0) {
       const topicLower = topic.toLowerCase();
       const topicWords = topicLower.split(/[\s,、。・\-\/]+/).filter(w => w.length >= 3);
       const recent10 = recentTopics.slice(-10).map(t => t.toLowerCase());
@@ -652,7 +662,12 @@ const scheduleAutonomousTasks = () => {
       switch (action) {
         case 'research':
         case 'deep_research': {
-          const searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
+          // Prioritize unexplored user curiosities over LLM-chosen topic
+          let searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
+          if (activeCuriosities.length > 0) {
+            searchPrompt = activeCuriosities[0];
+            log('info', `Using user curiosity as research topic: "${searchPrompt.slice(0, 80)}"`);
+          }
 
           setPhase('searching', searchPrompt.slice(0, 60));
           const searchPairs = getSuggestedSearchPairs(3, recentTopics);
@@ -710,6 +725,13 @@ const scheduleAutonomousTasks = () => {
             }
             Promise.all(graphPromises).catch(() => {});
           }
+
+          // Mark user curiosity as explored only after successful research
+          if (activeCuriosities.length > 0 && hasData) {
+            markCuriosityExplored(activeCuriosities[0]);
+            log('info', `Curiosity explored via main research: "${activeCuriosities[0].slice(0, 60)}"`);
+          }
+
           actionResult = result;
           break;
         }

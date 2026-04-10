@@ -4,6 +4,7 @@
 直近: {{recentActivity}}
 
 目標: {{userPrompt}}
+ユーザーの関心（最優先で調査）: {{userCuriosities}}
 進捗: {{goalProgress}}
 次のサブタスク: {{nextSubtask}}
 実績: {{feedbackSummary}}
