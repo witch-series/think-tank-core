@@ -424,6 +424,15 @@ const chat = async (client, userMessage, context) => {
   const systemPrompt = context?.systemPrompt || loadPrompt('chat.system');
 
   const parts = [];
+
+  // Include recent conversation history for continuity
+  if (context?.history && context.history.length > 0) {
+    const historyLines = context.history.map(m =>
+      `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text.slice(0, 300)}`
+    );
+    parts.push(`## 直近の会話:\n${historyLines.join('\n')}`);
+  }
+
   if (context?.knowledge) {
     parts.push(`## 調査結果・知識:\n${context.knowledge}`);
   }

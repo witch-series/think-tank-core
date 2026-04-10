@@ -307,12 +307,20 @@ const cleanupVisitedUrls = () => {
 
 // --- Helper: detect research intent from user chat and store as curiosity ---
 
-const detectAndStoreCuriosity = (client, userMessage) => {
+const detectAndStoreCuriosity = (client, userMessage, recentHistory) => {
   // Fire-and-forget — don't block the chat response
   (async () => {
     try {
       const systemPrompt = loadPrompt('detect-research-intent.system');
-      const response = await client.query(userMessage, systemPrompt);
+      // Include recent conversation context so intent detection considers the full exchange
+      let prompt = userMessage;
+      if (recentHistory && recentHistory.length > 0) {
+        const historyStr = recentHistory.map(m =>
+          `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text.slice(0, 200)}`
+        ).join('\n');
+        prompt = `## 直近の会話:\n${historyStr}\n\n## 最新のメッセージ:\n${userMessage}`;
+      }
+      const response = await client.query(prompt, systemPrompt);
       const text = (response.response || '').trim();
       const parsed = parseJsonSafe(text);
       if (!parsed) return;
@@ -1309,8 +1317,11 @@ const startServer = (port) => {
         log('info', `User chat: ${message.slice(0, 80)}`);
         saveChatMessage('user', message);
         try {
+          // Load recent chat history (excluding the message just saved) for context
+          const recentHistory = loadChatHistory().slice(-11, -1); // last 10 messages (5 turns)
           let reply = await chat(ollamaClient, message, {
-            knowledge: knowledgeSummary
+            knowledge: knowledgeSummary,
+            history: recentHistory
           });
           // Strip any file name/path references
           reply = reply.replace(/[A-Za-z0-9_\-]+\.(txt|json|jsonl|csv|md|js|py|yaml|yml|xml|bak|log|tmp)\b/gi, '').replace(/\s{2,}/g, ' ').trim();
@@ -1318,7 +1329,7 @@ const startServer = (port) => {
           saveChatMessage('assistant', reply);
 
           // Detect if user message is a research directive and update searchPrompt
-          detectAndStoreCuriosity(ollamaClient, message);
+          detectAndStoreCuriosity(ollamaClient, message, recentHistory);
 
           res.end(JSON.stringify({
             reply,
