@@ -118,6 +118,216 @@ const hasSources = (node) => {
   return Array.isArray(node.sources) && node.sources.length > 0;
 };
 
+// --- Large-graph optimization primitives -------------------------------
+
+/**
+ * Build an undirected adjacency map from the graph's edge list. O(V + E).
+ * Returns Map<key, Array<neighborKey>> for fast neighbor iteration.
+ */
+const buildAdjacency = (graph) => {
+  const adj = new Map();
+  for (const k of Object.keys(graph.nodes)) adj.set(k, []);
+  for (const e of graph.edges) {
+    if (adj.has(e.from)) adj.get(e.from).push(e.to);
+    if (adj.has(e.to)) adj.get(e.to).push(e.from);
+  }
+  return adj;
+};
+
+/**
+ * Union-Find (Disjoint Set Union) with path halving.
+ * `mergeInto(from, into)` always makes `into`'s root the canonical root so
+ * the caller can pick which label survives a merge. O(α(N)) per operation.
+ */
+const createDsu = () => {
+  const parent = new Map();
+  const find = (x) => {
+    if (!parent.has(x)) { parent.set(x, x); return x; }
+    let p = parent.get(x);
+    while (p !== parent.get(p)) {
+      const gp = parent.get(parent.get(p));
+      parent.set(p, gp);
+      p = gp;
+    }
+    parent.set(x, p);
+    return p;
+  };
+  const mergeInto = (from, into) => {
+    const rf = find(from);
+    const ri = find(into);
+    if (rf === ri) return false;
+    parent.set(rf, ri);
+    return true;
+  };
+  return { find, mergeInto, has: (x) => parent.has(x) };
+};
+
+/**
+ * Apply a batch of merge requests via Union-Find in O(N + E + M α(N))
+ * instead of the naive O(M * E) that per-merge edge rewriting would cost.
+ * `mergePairs` is an array of [fromKey, intoKey]; missing nodes are skipped.
+ * Metadata (count/sources/topics/description) is folded into the surviving
+ * root node. All edges are rewritten and deduplicated in a single pass.
+ */
+const applyDsuMerges = (graph, mergePairs, onLog) => {
+  if (!mergePairs || mergePairs.length === 0) return 0;
+  const dsu = createDsu();
+  for (const k of Object.keys(graph.nodes)) dsu.find(k);
+  let requested = 0;
+  for (const [from, into] of mergePairs) {
+    if (!from || !into || from === into) continue;
+    if (!graph.nodes[from] || !graph.nodes[into]) continue;
+    // Follow any previously-set root for `into` so chained merges collapse correctly.
+    const rootInto = dsu.find(into);
+    if (dsu.mergeInto(from, rootInto)) requested++;
+  }
+  if (requested === 0) return 0;
+
+  // Group every node by its final root.
+  const groups = new Map();
+  for (const k of Object.keys(graph.nodes)) {
+    const root = dsu.find(k);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(k);
+  }
+
+  // Fold non-root members into the root node, then delete them.
+  let collapsed = 0;
+  for (const [root, members] of groups) {
+    if (members.length < 2) continue;
+    const dst = graph.nodes[root];
+    if (!dst) continue;
+    const srcSetAll = new Set(dst.sources || []);
+    const topicSetAll = new Set(dst.topics || []);
+    let bestDesc = dst.description || '';
+    let countSum = dst.count || 1;
+    for (const m of members) {
+      if (m === root) continue;
+      const src = graph.nodes[m];
+      if (!src) continue;
+      countSum += src.count || 1;
+      if (Array.isArray(src.sources)) for (const s of src.sources) srcSetAll.add(s);
+      if (Array.isArray(src.topics)) for (const t of src.topics) topicSetAll.add(t);
+      if ((src.description || '').length > bestDesc.length) bestDesc = src.description;
+      delete graph.nodes[m];
+      collapsed++;
+    }
+    dst.count = countSum;
+    dst.sources = [...srcSetAll].slice(0, 20);
+    dst.topics = [...topicSetAll].slice(0, 10);
+    if (bestDesc) dst.description = bestDesc;
+    dst.lastUpdated = new Date().toISOString();
+  }
+
+  // Rewrite all edges once: remap endpoints, drop self-loops, dedupe duplicates
+  // while summing weights. Single O(E) pass vs. per-merge O(M * E).
+  const seen = new Map();
+  for (const e of graph.edges) {
+    let nf = dsu.find(e.from);
+    let nt = dsu.find(e.to);
+    if (!graph.nodes[nf] || !graph.nodes[nt]) continue;
+    if (nf === nt) continue;
+    const pair = nf < nt ? nf + '|' + nt : nt + '|' + nf;
+    if (seen.has(pair)) {
+      seen.get(pair).weight = (seen.get(pair).weight || 1) + (e.weight || 1);
+    } else {
+      seen.set(pair, { from: nf, to: nt, relation: e.relation || '', weight: e.weight || 1 });
+    }
+  }
+  graph.edges = [...seen.values()];
+
+  if (onLog) onLog('debug', `DSU merge: collapsed ${collapsed} nodes from ${requested} merge requests`);
+  return collapsed;
+};
+
+/**
+ * BFS-based community batching. Each batch starts from the highest-degree
+ * unvisited node and expands outward through its neighbors, so each batch
+ * contains a semantically related cluster of keywords rather than random
+ * picks. The LLM sees candidate duplicates next to each other, which makes
+ * cross-node merges dramatically easier to spot.
+ *
+ * Isolated (zero-degree) nodes are packed into their own batches so they
+ * don't dilute connected clusters.
+ */
+const buildCommunityBatches = (keys, adj, batchSize) => {
+  if (batchSize < 2) batchSize = 2;
+  const visited = new Set();
+  const batches = [];
+  const isolated = [];
+
+  const byDegree = keys.slice().sort((a, b) =>
+    (adj.get(b)?.length || 0) - (adj.get(a)?.length || 0)
+  );
+
+  for (const seed of byDegree) {
+    if (visited.has(seed)) continue;
+    if ((adj.get(seed)?.length || 0) === 0) {
+      isolated.push(seed);
+      visited.add(seed);
+      continue;
+    }
+    const batch = [];
+    const queue = [seed];
+    while (queue.length > 0 && batch.length < batchSize) {
+      const k = queue.shift();
+      if (visited.has(k)) continue;
+      visited.add(k);
+      batch.push(k);
+      const neighbors = adj.get(k) || [];
+      // Shuffle neighbors lightly to avoid always following the first edge
+      for (const n of neighbors) {
+        if (!visited.has(n)) queue.push(n);
+      }
+    }
+    if (batch.length > 0) batches.push(batch);
+  }
+
+  for (let i = 0; i < isolated.length; i += batchSize) {
+    batches.push(isolated.slice(i, i + batchSize));
+  }
+  return batches;
+};
+
+/**
+ * Label-propagation category assignment. Runs before LLM review so that
+ * uncategorized nodes pick up their neighbors' majority category for free.
+ * Caps out at 3 iterations — label propagation converges very quickly on
+ * sparse graphs. Returns the number of nodes newly categorized.
+ */
+const propagateCategories = (graph, adj) => {
+  const nodeKeys = Object.keys(graph.nodes);
+  let totalAssigned = 0;
+  for (let iter = 0; iter < 3; iter++) {
+    let changedThisIter = 0;
+    for (const k of nodeKeys) {
+      const node = graph.nodes[k];
+      if (!node || node.category) continue;
+      const neighbors = adj.get(k) || [];
+      if (neighbors.length === 0) continue;
+      const catCounts = {};
+      for (const n of neighbors) {
+        const raw = graph.nodes[n]?.category;
+        if (!raw) continue;
+        const base = raw.split('/')[0].trim().toLowerCase();
+        if (!base) continue;
+        catCounts[base] = (catCounts[base] || 0) + 1;
+      }
+      let best = null, bestCount = 0;
+      for (const [c, n] of Object.entries(catCounts)) {
+        if (n > bestCount) { best = c; bestCount = n; }
+      }
+      if (best) {
+        node.category = best;
+        totalAssigned++;
+        changedThisIter++;
+      }
+    }
+    if (changedThisIter === 0) break;
+  }
+  return totalAssigned;
+};
+
 // In-memory graph cache with mtime invalidation.
 // The graph is hot: getGraphStats alone causes 4 loads of a ~1.75 MB JSON.
 // Readers are synchronous (no awaits mid-iteration), so sharing the parsed
@@ -317,119 +527,21 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
 
   if (onLog) onLog('info', `Reviewing knowledge graph (${keys.length} nodes, ${graph.edges.length} edges)`);
 
-  // Determine batch size based on model capability
   const modelConfig = getModelConfig(options.ollamaConfig || { model: client.model });
   const reviewBatchSize = modelConfig.reviewBatchSize;
 
-  // Helper: apply a single review result to the graph
-  function applyReviewResult(result) {
-    let mergeCount = 0, addCount = 0, removeCount = 0;
-
-    const merges = Array.isArray(result.merge) ? result.merge : [];
-    const mergedFromKeys = new Set();
-    for (const m of merges) {
-      const fromKey = normalizeKey(m.from);
-      const intoKey = normalizeKey(m.into);
-      if (!fromKey || !intoKey || fromKey === intoKey) continue;
-      if (!graph.nodes[fromKey] || !graph.nodes[intoKey]) continue;
-
-      const src = graph.nodes[fromKey];
-      const dst = graph.nodes[intoKey];
-      dst.count = (dst.count || 1) + (src.count || 1);
-      const srcSet = new Set([...(dst.sources || []), ...(src.sources || [])]);
-      dst.sources = [...srcSet].slice(0, 20);
-      const topicSet = new Set([...(dst.topics || []), ...(src.topics || [])]);
-      dst.topics = [...topicSet].slice(0, 10);
-      if (src.description && src.description.length > (dst.description || '').length) {
-        dst.description = src.description;
-      }
-      dst.lastUpdated = new Date().toISOString();
-
-      for (const edge of graph.edges) {
-        if (edge.from === fromKey) edge.from = intoKey;
-        if (edge.to === fromKey) edge.to = intoKey;
-      }
-      mergedFromKeys.add(fromKey);
-      delete graph.nodes[fromKey];
-      if (onLog) onLog('debug', `Graph merge: ${m.from} → ${m.into}`);
-      mergeCount++;
-    }
-    // Batch self-loop removal after all merges
-    if (mergedFromKeys.size > 0) {
-      graph.edges = graph.edges.filter(e => e.from !== e.to);
-    }
-
-    const categories = result.categories || {};
-    for (const [label, category] of Object.entries(categories)) {
-      const key = normalizeKey(label);
-      if (graph.nodes[key]) graph.nodes[key].category = category;
-    }
-
-    const addEdges = Array.isArray(result.addEdges) ? result.addEdges : [];
-    // Build edge lookup set for fast duplicate check
-    const existingEdgeSet = new Set(
-      graph.edges.map(e => [e.from, e.to].sort().join('|'))
-    );
-    for (const e of addEdges) {
-      const fromKey = normalizeKey(e.from);
-      const toKey = normalizeKey(e.to);
-      if (!fromKey || !toKey || fromKey === toKey) continue;
-      if (!graph.nodes[fromKey] || !graph.nodes[toKey]) continue;
-      const pairKey = [fromKey, toKey].sort().join('|');
-      if (!existingEdgeSet.has(pairKey)) {
-        graph.edges.push({ from: fromKey, to: toKey, relation: e.relation || '', weight: 1 });
-        existingEdgeSet.add(pairKey);
-        addCount++;
-      }
-    }
-
-    // Remove nodes flagged by LLM — but protect nodes that have information sources
-    let nodeRemoveCount = 0;
-    const removeNodes = Array.isArray(result.remove) ? result.remove : [];
-    if (removeNodes.length > 0) {
-      const removedKeys = new Set();
-      for (const label of removeNodes) {
-        const key = normalizeKey(label);
-        if (key && graph.nodes[key]) {
-          if (hasSources(graph.nodes[key])) {
-            if (onLog) onLog('debug', `Graph review: protected "${label}" (has sources)`);
-            continue;
-          }
-          delete graph.nodes[key];
-          removedKeys.add(key);
-          nodeRemoveCount++;
-          if (onLog) onLog('debug', `Graph review remove: ${label}`);
-        }
-      }
-      if (removedKeys.size > 0) {
-        graph.edges = graph.edges.filter(e => !removedKeys.has(e.from) && !removedKeys.has(e.to));
-      }
-    }
-
-    const removeEdges = Array.isArray(result.removeEdges) ? result.removeEdges : [];
-    if (removeEdges.length > 0) {
-      // Batch edge removal — collect all pairs to remove, then single filter pass
-      const removePairs = new Set();
-      for (const e of removeEdges) {
-        const fromKey = normalizeKey(e.from);
-        const toKey = normalizeKey(e.to);
-        removePairs.add([fromKey, toKey].sort().join('|'));
-        removeCount++;
-      }
-      graph.edges = graph.edges.filter(ex => {
-        const pairKey = [ex.from, ex.to].sort().join('|');
-        return !removePairs.has(pairKey);
-      });
-    }
-
-    return { mergeCount, addCount, removeCount: removeCount + nodeRemoveCount };
-  }
-
   try {
-    let totalMerges = 0, totalAdds = 0, totalRemoves = 0;
+    // --- Pre-pass 1: programmatic category propagation -----------------
+    // Build adjacency once (O(V+E)) and fill in missing categories from
+    // neighbor-majority votes. This converts LLM work into free wins for
+    // any node whose neighbors already agree on a category.
+    const adj = buildAdjacency(graph);
+    const propagated = propagateCategories(graph, adj);
+    if (propagated > 0 && onLog) {
+      onLog('info', `Label propagation: filled ${propagated} missing categories from neighbors`);
+    }
 
-    // Build a global snapshot (category distribution + counts) so each batch can
-    // judge categories in light of the whole graph, not just its local slice.
+    // --- Global context snapshot passed into every LLM batch ----------
     const globalCategoryCounts = {};
     for (const k of keys) {
       const c = normCategory(graph.nodes[k].category) || '未分類';
@@ -438,19 +550,21 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
     const sortedCats = Object.entries(globalCategoryCounts).sort((a, b) => b[1] - a[1]);
     const globalContext = `全ノード数: ${keys.length}、全エッジ数: ${graph.edges.length}\n現在のカテゴリ分布: ${sortedCats.map(([c, n]) => `${c}(${n})`).join(', ')}`;
 
-    // Shuffle keys so each batch sees a diverse cross-section of the graph
-    // rather than an alphabetically clustered slice — this helps cross-domain
-    // merges and category rebalancing.
-    const shuffled = keys.slice();
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
+    // --- Community-based batching -------------------------------------
+    // BFS from highest-degree nodes builds semantically coherent batches
+    // so the LLM sees candidate duplicates clustered together, which is
+    // what makes merge detection actually work at scale.
+    const batches = buildCommunityBatches(keys, adj, reviewBatchSize);
+    if (onLog) onLog('info', `Review batches: ${batches.length} communities (batch size ${reviewBatchSize})`);
 
-    const batches = [];
-    for (let i = 0; i < shuffled.length; i += reviewBatchSize) {
-      batches.push(shuffled.slice(i, i + reviewBatchSize));
-    }
+    // Accumulate all LLM operations across batches and apply them once at
+    // the end. This avoids mutating the graph mid-iteration and lets us
+    // apply merges via DSU in a single O(V+E) pass rather than O(M*E).
+    const pendingMerges = [];          // [[fromKey, intoKey], ...]
+    const pendingRemoves = new Set();  // keys to remove (respecting hasSources)
+    const pendingCategories = {};      // key -> category
+    const pendingAddEdges = [];        // { from, to, relation }
+    const pendingRemoveEdges = new Set(); // sorted pair keys
 
     for (const batchKeys of batches) {
       const nodeList = batchKeys.map(k => {
@@ -459,42 +573,117 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
         return `- ${n.label} (${n.count || 1}回, カテゴリ: ${n.category || '未分類'}): ${(n.description || '').slice(0, 80)}`;
       }).filter(Boolean).join('\n');
 
-      // Include only edges relevant to this batch
+      // Gather edges touching this batch via the adjacency map (O(batch*avgDeg))
+      // rather than O(E) filtering.
       const batchKeySet = new Set(batchKeys);
-      const edgeList = graph.edges
-        .filter(e => batchKeySet.has(e.from) || batchKeySet.has(e.to))
-        .map(e => {
-          const fromLabel = graph.nodes[e.from]?.label || e.from;
-          const toLabel = graph.nodes[e.to]?.label || e.to;
-          return `- ${fromLabel} → ${toLabel}: ${e.relation || '関連'} (重み: ${e.weight || 1})`;
-        }).join('\n') || 'なし';
+      const seenEdgePairs = new Set();
+      const edgeLines = [];
+      for (const k of batchKeys) {
+        const neighbors = adj.get(k) || [];
+        for (const n of neighbors) {
+          if (!batchKeySet.has(n) && !batchKeySet.has(k)) continue;
+          const pair = k < n ? k + '|' + n : n + '|' + k;
+          if (seenEdgePairs.has(pair)) continue;
+          seenEdgePairs.add(pair);
+          const fromLabel = graph.nodes[k]?.label || k;
+          const toLabel = graph.nodes[n]?.label || n;
+          edgeLines.push(`- ${fromLabel} → ${toLabel}: 関連`);
+        }
+      }
+      const edgeList = edgeLines.length > 0 ? edgeLines.join('\n') : 'なし';
 
       const prompt = fillPrompt('review-graph.user', { nodeList, edgeList, globalContext, goalPrompt: goalPrompt || 'なし' });
       const { parsed: result } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
-      if (result) {
-        const counts = applyReviewResult(result);
-        totalMerges += counts.mergeCount;
-        totalAdds += counts.addCount;
-        totalRemoves += counts.removeCount;
+      if (!result) continue;
+
+      for (const m of (Array.isArray(result.merge) ? result.merge : [])) {
+        const fromKey = normalizeKey(m.from);
+        const intoKey = normalizeKey(m.into);
+        if (fromKey && intoKey && fromKey !== intoKey) {
+          pendingMerges.push([fromKey, intoKey]);
+        }
+      }
+      for (const [label, category] of Object.entries(result.categories || {})) {
+        const key = normalizeKey(label);
+        if (key) pendingCategories[key] = category;
+      }
+      for (const e of (Array.isArray(result.addEdges) ? result.addEdges : [])) {
+        const fromKey = normalizeKey(e.from);
+        const toKey = normalizeKey(e.to);
+        if (fromKey && toKey && fromKey !== toKey) {
+          pendingAddEdges.push({ from: fromKey, to: toKey, relation: e.relation || '' });
+        }
+      }
+      for (const label of (Array.isArray(result.remove) ? result.remove : [])) {
+        const key = normalizeKey(label);
+        if (key) pendingRemoves.add(key);
+      }
+      for (const e of (Array.isArray(result.removeEdges) ? result.removeEdges : [])) {
+        const fromKey = normalizeKey(e.from);
+        const toKey = normalizeKey(e.to);
+        if (fromKey && toKey) {
+          pendingRemoveEdges.add(fromKey < toKey ? fromKey + '|' + toKey : toKey + '|' + fromKey);
+        }
       }
     }
 
-    // Deduplicate edges (same from/to pair)
-    const edgeMap = new Map();
-    for (const e of graph.edges) {
-      const pairKey = [e.from, e.to].sort().join('|');
-      if (edgeMap.has(pairKey)) {
-        edgeMap.get(pairKey).weight = (edgeMap.get(pairKey).weight || 1) + (e.weight || 1);
-      } else {
-        edgeMap.set(pairKey, e);
+    // --- Apply accumulated operations ---------------------------------
+    // 1) Merges via DSU (single pass, O(V+E) edge rewrite)
+    const mergedCount = applyDsuMerges(graph, pendingMerges, onLog);
+
+    // 2) Category updates (after merges so they land on surviving keys)
+    let categoriesUpdated = 0;
+    for (const [key, category] of Object.entries(pendingCategories)) {
+      if (graph.nodes[key]) {
+        graph.nodes[key].category = category;
+        categoriesUpdated++;
       }
     }
-    graph.edges = [...edgeMap.values()];
+
+    // 3) Remove flagged nodes (protecting any that still have sources)
+    let removedCount = 0;
+    if (pendingRemoves.size > 0) {
+      const actuallyRemoved = new Set();
+      for (const key of pendingRemoves) {
+        const node = graph.nodes[key];
+        if (!node) continue;
+        if (hasSources(node)) continue;
+        delete graph.nodes[key];
+        actuallyRemoved.add(key);
+        removedCount++;
+      }
+      if (actuallyRemoved.size > 0) {
+        graph.edges = graph.edges.filter(e => !actuallyRemoved.has(e.from) && !actuallyRemoved.has(e.to));
+      }
+    }
+
+    // 4) Add new edges (deduped against existing)
+    const existingPairs = new Set(graph.edges.map(e => e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from));
+    let addedCount = 0;
+    for (const e of pendingAddEdges) {
+      if (!graph.nodes[e.from] || !graph.nodes[e.to]) continue;
+      const pair = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from;
+      if (existingPairs.has(pair)) continue;
+      graph.edges.push({ from: e.from, to: e.to, relation: e.relation, weight: 1 });
+      existingPairs.add(pair);
+      addedCount++;
+    }
+
+    // 5) Remove flagged edges
+    let edgesRemoved = 0;
+    if (pendingRemoveEdges.size > 0) {
+      const before = graph.edges.length;
+      graph.edges = graph.edges.filter(ex => {
+        const pair = ex.from < ex.to ? ex.from + '|' + ex.to : ex.to + '|' + ex.from;
+        return !pendingRemoveEdges.has(pair);
+      });
+      edgesRemoved = before - graph.edges.length;
+    }
 
     saveGraph(graph);
 
     const newKeys = Object.keys(graph.nodes);
-    if (onLog) onLog('info', `Graph review done: ${newKeys.length} nodes, ${graph.edges.length} edges (merged ${totalMerges}, +${totalAdds} edges, -${totalRemoves} edges)`);
+    if (onLog) onLog('info', `Graph review done: ${newKeys.length} nodes, ${graph.edges.length} edges (merged ${mergedCount}, removed ${removedCount} nodes, +${addedCount} edges, -${edgesRemoved} edges, categorized ${categoriesUpdated})`);
   } catch (e) {
     if (onLog) onLog('debug', `Graph review failed: ${e.message}`);
   }
@@ -945,38 +1134,54 @@ const _pruneGraphInner = async (client, onLog, options = {}) => {
   let totalRemoved = 0;
   const removedLabels = [...prePassMerged];
 
-  // Helper: apply LLM prune result to graph (batched edge removal)
-  function applyPruneResult(result) {
-    const merges = Array.isArray(result.merge) ? result.merge : [];
-    for (const m of merges) {
+  // Collector for LLM-proposed operations in a round. Merges are applied
+  // once at the end of the round via DSU so the cost is O(V+E) total
+  // regardless of how many merges the LLM proposed.
+  let roundMerges = [];
+  const roundRemoves = new Set();
+
+  function collectPruneResult(result) {
+    for (const m of (Array.isArray(result.merge) ? result.merge : [])) {
       const fromKey = normalizeKey(m.from);
       const intoKey = normalizeKey(m.into);
       if (!fromKey || !intoKey || fromKey === intoKey) continue;
       if (!graph.nodes[fromKey] || !graph.nodes[intoKey]) continue;
-      mergeNodes(intoKey, fromKey);
-      totalMerged++;
-      if (onLog) onLog('debug', `Prune merge: ${m.from} → ${m.into}${m.reason ? ' (' + m.reason + ')' : ''}`);
+      roundMerges.push([fromKey, intoKey]);
+      if (onLog) onLog('debug', `Prune merge queued: ${m.from} → ${m.into}${m.reason ? ' (' + m.reason + ')' : ''}`);
     }
-    const removes = Array.isArray(result.remove) ? result.remove : [];
-    const removedKeys = new Set();
-    for (const label of removes) {
+    for (const label of (Array.isArray(result.remove) ? result.remove : [])) {
       const key = normalizeKey(label);
-      if (key && graph.nodes[key]) {
-        if (hasSources(graph.nodes[key])) {
-          if (onLog) onLog('debug', `Prune: protected "${label}" (has sources)`);
-          continue;
-        }
-        removedLabels.push(graph.nodes[key].label || label);
-        delete graph.nodes[key];
-        removedKeys.add(key);
-        totalRemoved++;
-        if (onLog) onLog('debug', `Prune remove: ${label}`);
+      if (!key || !graph.nodes[key]) continue;
+      if (hasSources(graph.nodes[key])) {
+        if (onLog) onLog('debug', `Prune: protected "${label}" (has sources)`);
+        continue;
       }
+      roundRemoves.add(key);
     }
-    // Batch edge removal — single pass instead of per-node filter
-    if (removedKeys.size > 0) {
-      graph.edges = graph.edges.filter(e => !removedKeys.has(e.from) && !removedKeys.has(e.to));
+  }
+
+  function applyRoundOperations() {
+    const beforeNodes = Object.keys(graph.nodes).length;
+    if (roundMerges.length > 0) {
+      const collapsed = applyDsuMerges(graph, roundMerges, onLog);
+      totalMerged += collapsed;
+      roundMerges = [];
     }
+    if (roundRemoves.size > 0) {
+      const actuallyRemoved = new Set();
+      for (const key of roundRemoves) {
+        if (!graph.nodes[key]) continue;
+        removedLabels.push(graph.nodes[key].label || key);
+        delete graph.nodes[key];
+        actuallyRemoved.add(key);
+        totalRemoved++;
+      }
+      if (actuallyRemoved.size > 0) {
+        graph.edges = graph.edges.filter(e => !actuallyRemoved.has(e.from) && !actuallyRemoved.has(e.to));
+      }
+      roundRemoves.clear();
+    }
+    return beforeNodes - Object.keys(graph.nodes).length;
   }
 
   // --- Pre-LLM pruning: remove obviously junk nodes without LLM ---
@@ -1132,12 +1337,15 @@ const _pruneGraphInner = async (client, onLog, options = {}) => {
       try {
         const { parsed } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
         if (parsed) {
-          applyPruneResult(parsed);
+          collectPruneResult(parsed);
         }
       } catch (e) {
         if (onLog) onLog('debug', `Prune round ${round} batch failed: ${e.message}`);
       }
     }
+
+    // Apply merges + removes for this round in one DSU pass
+    applyRoundOperations();
 
     const mergedThisRound = (totalMerged + totalRemoved) - mergedBefore;
     if (onLog) onLog('info', `Prune round ${round}: merged/removed ${mergedThisRound} keywords`);
