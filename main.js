@@ -165,7 +165,13 @@ const addCuriosity = (topic, source) => {
 
 const getNextCuriosity = () => {
   const items = loadCuriosities();
-  return items.find(c => !c.explored) || null;
+  // Prioritize user_chat curiosities (newest first), then others (newest first).
+  // The most recently expressed interest should be investigated first.
+  const unexplored = items.filter(c => !c.explored);
+  const userItems = unexplored.filter(c => c.source === 'user_chat').reverse();
+  if (userItems.length > 0) return userItems[0];
+  const otherItems = unexplored.reverse();
+  return otherItems[0] || null;
 }
 
 const markCuriosityExplored = (topic) => {
@@ -519,9 +525,12 @@ const scheduleAutonomousTasks = () => {
     const context = collectContext();
     const graphStats = getGraphStats(recentTopics);
 
-    // Collect active user curiosities (unexplored, from user_chat)
+    // Collect active user curiosities (unexplored, from user_chat).
+    // Ordered newest-first so the most recently expressed interest is prioritized.
     const activeCuriosities = loadCuriosities()
       .filter(c => !c.explored && c.source === 'user_chat')
+      .slice()
+      .reverse()
       .map(c => c.topic);
     const userCuriosityStr = activeCuriosities.length > 0
       ? activeCuriosities.map(t => t.slice(0, 80)).join(' / ')
@@ -1517,17 +1526,31 @@ const shutdown = () => {
     if (dreamTimer) { clearTimeout(dreamTimer); dreamTimer = null; }
 
     if (httpServer) {
-      httpServer.close(() => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
         httpServer = null;
         restarting = false;
         resolve();
-      });
-      // Force close after 3 seconds
-      setTimeout(() => {
-        if (httpServer) { httpServer = null; }
-        restarting = false;
-        resolve();
-      }, 3000);
+      };
+
+      httpServer.close(finish);
+
+      // Forcibly destroy any lingering connections (SSE, keep-alive) so the
+      // port is actually released. Without this, close() waits forever for
+      // open sockets and the next start() hits EADDRINUSE.
+      try {
+        if (typeof httpServer.closeAllConnections === 'function') {
+          httpServer.closeAllConnections();
+        }
+      } catch (e) {
+        log('debug', `closeAllConnections failed: ${e.message}`);
+      }
+
+      // Safety fallback: if close() callback never fires within 3s,
+      // resolve anyway so we don't hang the restart sequence.
+      setTimeout(finish, 3000);
     } else {
       restarting = false;
       resolve();
