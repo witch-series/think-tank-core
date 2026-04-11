@@ -58,6 +58,15 @@ const searchBrave = async (query, maxResults = 5) => {
       if (/\.(png|jpg|jpeg|gif|svg|ico|css|js|woff)(\?|$)/i.test(url)) continue;
       if (url.includes('favicon') || url.includes('/ads/') || url.includes('doubleclick')) continue;
 
+      // Skip site-root / homepage URLs — we want actual article pages, not landings
+      try {
+        const parsedUrl = new URL(url);
+        const pathSegments = parsedUrl.pathname.split('/').filter(Boolean);
+        if (pathSegments.length === 0) continue;
+        // Skip shallow category/tag pages that rarely contain article body
+        if (pathSegments.length === 1 && /^(tag|tags|category|categories|about|contact|privacy|terms|login|signup)$/i.test(pathSegments[0])) continue;
+      } catch { continue; }
+
       seen.add(url);
 
       // Try to extract title from surrounding context (look back for text)
@@ -311,7 +320,7 @@ const searchWeb = async (query, maxResults = 5) => {
 /**
  * Fetch a web page and extract readable text content
  */
-const fetchPage = async (pageUrl, maxLength = 6000) => {
+const fetchPage = async (pageUrl, maxLength = 8000) => {
   try {
     const res = await fetch(pageUrl, {
       headers: {
@@ -324,22 +333,43 @@ const fetchPage = async (pageUrl, maxLength = 6000) => {
 
     if (res.status !== 200) return { url: pageUrl, error: `HTTP ${res.status}` };
 
-    let text = res.body;
+    let html = res.body;
 
-    // Remove non-content elements
-    text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
-    text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
-    text = text.replace(/<nav[\s\S]*?<\/nav>/gi, '');
-    text = text.replace(/<footer[\s\S]*?<\/footer>/gi, '');
-    text = text.replace(/<header[\s\S]*?<\/header>/gi, '');
-    // Remove all tags
-    text = text.replace(/<[^>]+>/g, ' ');
-    // Decode entities
+    // Strip non-content elements first
+    html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+    html = html.replace(/<style[\s\S]*?<\/style>/gi, '');
+    html = html.replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+    html = html.replace(/<nav[\s\S]*?<\/nav>/gi, '');
+    html = html.replace(/<footer[\s\S]*?<\/footer>/gi, '');
+    html = html.replace(/<header[\s\S]*?<\/header>/gi, '');
+    html = html.replace(/<aside[\s\S]*?<\/aside>/gi, '');
+    html = html.replace(/<form[\s\S]*?<\/form>/gi, '');
+
+    // Prefer the main article container when present — avoids picking up sidebars,
+    // related-articles lists, and site chrome so the LLM sees the actual body.
+    const extractBlock = (regex) => {
+      const m = html.match(regex);
+      return m ? m[1] : '';
+    };
+    let core = extractBlock(/<article[^>]*>([\s\S]*?)<\/article>/i)
+      || extractBlock(/<main[^>]*>([\s\S]*?)<\/main>/i)
+      || extractBlock(/<div[^>]+(?:id|class)="[^"]*(?:article|post|entry|content|body)[^"]*"[^>]*>([\s\S]*?)<\/div>/i)
+      || html;
+
+    // Strip remaining tags
+    let text = core.replace(/<[^>]+>/g, ' ');
     text = decodeEntities(text);
     // Collapse whitespace
     text = text.replace(/[ \t]+/g, ' ');
     text = text.replace(/\n\s*\n/g, '\n');
     text = text.trim();
+
+    // Fallback: if the structured extraction came back unusable, use a full-body strip.
+    if (text.length < 200) {
+      let full = html.replace(/<[^>]+>/g, ' ');
+      full = decodeEntities(full).replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n').trim();
+      if (full.length > text.length) text = full;
+    }
 
     return { url: pageUrl, text: text.slice(0, maxLength) };
   } catch (err) {

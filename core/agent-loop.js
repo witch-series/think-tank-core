@@ -479,7 +479,7 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
     onLog('info', `Fetching ${toFetch.length} pages by credibility: ${Object.entries(typeBreakdown).map(([k,v]) => `${k}:${v}`).join(', ')}`);
 
     const fetchResults = await Promise.all(
-      toFetch.map(p => fetchPage(p.url, p.maxLen || 4000).catch(() => ({ url: p.url, error: 'fetch failed' })))
+      toFetch.map(p => fetchPage(p.url, p.maxLen || 8000).catch(() => ({ url: p.url, error: 'fetch failed' })))
     );
 
     for (let i = 0; i < fetchResults.length; i++) {
@@ -487,8 +487,9 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
       const meta = toFetch[i];
       newlyVisited.push(meta.url);
 
-      if (page.error || !page.text || page.text.length <= 100) {
-        // Mark failed URLs with zero credibility so they are deprioritized
+      if (page.error || !page.text || page.text.length <= 200) {
+        // Treat near-empty fetches as failures — they're usually paywalls / JS-only pages / homepages
+        // that we couldn't extract article body from. Mark as zero credibility.
         meta.credibility = 0;
         collectedData.push({
           type: meta.type,
@@ -498,7 +499,7 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
           credibility: 0,
           sourceType: meta.sourceType
         });
-        onLog('debug', `Fetch failed, marking URL as low-credibility: ${meta.url.slice(0, 80)}`);
+        onLog('debug', `Fetch yielded no article body: ${meta.url.slice(0, 80)}`);
         continue;
       }
 
@@ -506,7 +507,7 @@ const gatherResearch = async (client, taskDescription, onLog, options = {}) => {
         type: meta.type,
         source: `[${meta.sourceType}] ${(meta.title || meta.url.split('/').slice(2, 4).join('/')).slice(0, 60)}`,
         url: meta.url,
-        content: page.text.slice(0, 3000),
+        content: page.text,
         credibility: meta.credibility,
         sourceType: meta.sourceType
       });
@@ -822,21 +823,25 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
     (contentPriority[a.type] ?? 1) - (contentPriority[b.type] ?? 1)
   );
 
-  // Build the data section, keeping total size manageable
+  // Build the data section. Budget is generous enough for several full article bodies
+  // because the whole point is to let the LLM read the article content, not just titles.
   let dataSection = '';
   let totalLen = 0;
-  const maxDataLen = 6000;
+  const maxDataLen = 24000;
+  const maxPerPage = 6000;
 
   for (const d of sorted) {
-    // For search_results type, only include a brief mention, not the full link list
     let content = d.content;
+    // Search result listings are title+snippet noise — keep only a brief taste.
     if (d.type === 'search_results') {
       content = content.slice(0, 300);
+    } else if (content && content.length > maxPerPage) {
+      content = content.slice(0, maxPerPage) + '\n...(truncated)';
     }
     const entry = `\n### ${d.source}\n${content}\n`;
     if (totalLen + entry.length > maxDataLen) {
       const remaining = maxDataLen - totalLen;
-      if (remaining > 200) dataSection += entry.slice(0, remaining) + '\n...\n';
+      if (remaining > 400) dataSection += entry.slice(0, remaining) + '\n...\n';
       break;
     }
     dataSection += entry;
