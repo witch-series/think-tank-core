@@ -183,17 +183,20 @@ const markCuriosityExplored = (topic) => {
 
 // Record a failed exploration attempt. After MAX_CURIOSITY_RETRIES, mark the
 // curiosity as explored to prevent it from blocking the queue indefinitely.
-const MAX_CURIOSITY_RETRIES = 3;
+// Threshold is high because transient search failures are common for niche
+// topics and we'd rather keep trying than silently drop the user's request.
+const MAX_CURIOSITY_RETRIES = 8;
 const recordCuriosityFailure = (topic) => {
   const items = loadCuriosities();
   const item = items.find(c => c.topic === topic && !c.explored);
   if (!item) return;
   item.retryCount = (item.retryCount || 0) + 1;
+  log('debug', `Curiosity failure ${item.retryCount}/${MAX_CURIOSITY_RETRIES}: "${topic.slice(0, 60)}"`);
   if (item.retryCount >= MAX_CURIOSITY_RETRIES) {
     item.explored = true;
     item.exploredAt = new Date().toISOString();
     item.failed = true;
-    log('info', `Curiosity abandoned after ${MAX_CURIOSITY_RETRIES} failures: "${topic.slice(0, 60)}"`);
+    log('warn', `Curiosity abandoned after ${MAX_CURIOSITY_RETRIES} failures: "${topic.slice(0, 60)}"`);
   }
   saveCuriosities(items);
 }
@@ -694,19 +697,25 @@ const scheduleAutonomousTasks = () => {
       switch (action) {
         case 'research':
         case 'deep_research': {
-          // Prioritize unexplored user curiosities over LLM-chosen topic
+          // Prioritize unexplored user curiosities over LLM-chosen topic.
+          // When a curiosity drives the research, we also override goalPrompt
+          // and drop searchPairs / recentTopics so the agent loop doesn't
+          // steer results back toward the global goal or past topics — the
+          // user's explicit request must be treated as the authoritative goal.
           let searchPrompt = topic || config.searchPrompt || '最新の技術トレンドを調査してください';
-          if (activeCuriosities.length > 0) {
+          const isCuriosityDriven = activeCuriosities.length > 0;
+          if (isCuriosityDriven) {
             searchPrompt = activeCuriosities[0];
             log('info', `Using user curiosity as research topic: "${searchPrompt.slice(0, 80)}"`);
           }
 
           setPhase('searching', searchPrompt.slice(0, 60));
-          const searchPairs = getSuggestedSearchPairs(3, recentTopics);
+          const searchPairs = isCuriosityDriven ? [] : getSuggestedSearchPairs(3, recentTopics);
           const result = await runAgentLoop(ollamaClient, searchPrompt, ROOT, {
             workLogDir, onLog: log, mode: 'research',
-            visitedUrls, recentTopics,
-            goalPrompt: config.finalGoal || config.searchPrompt || '',
+            visitedUrls,
+            recentTopics: isCuriosityDriven ? [] : recentTopics,
+            goalPrompt: isCuriosityDriven ? searchPrompt : (config.finalGoal || config.searchPrompt || ''),
             searchPairs
           });
 
@@ -1012,10 +1021,12 @@ const scheduleAutonomousTasks = () => {
         try {
           log('info', `Exploring curiosity: "${curiosity.topic.slice(0, 60)}"`);
           setPhase('curiosity', curiosity.topic.slice(0, 60));
+          // Curiosity topic is authoritative — use it as both task and goal,
+          // and pass empty recentTopics so the agent doesn't steer away from it.
           const curiosityResult = await runAgentLoop(ollamaClient, curiosity.topic, ROOT, {
             workLogDir, onLog: log, mode: 'research',
             visitedUrls: loadVisitedUrls(), recentTopics: [],
-            goalPrompt: config.finalGoal || config.searchPrompt || ''
+            goalPrompt: curiosity.topic
           });
           if (curiosityResult.visitedUrls && curiosityResult.visitedUrls.length > 0) {
             addVisitedUrls(curiosityResult.visitedUrls, curiosityResult.credibilityMap);
