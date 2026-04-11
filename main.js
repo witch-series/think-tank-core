@@ -22,7 +22,7 @@ const { parseJsonSafe } = require('./lib/json-parser');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
-const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect, searchGraphNodes } = require('./core/knowledge-graph');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect } = require('./core/knowledge-graph');
 const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
 const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
@@ -1295,56 +1295,60 @@ const startServer = (port) => {
         const recentAnalysis = getNewKnowledge(path.resolve(ROOT, 'brain', 'analysis'), 72);
         const allKnowledge = [...recentResearch, ...recentAnalysis];
 
-        // Extract keywords from user message for relevance matching.
-        // Japanese text has no spaces, so whitespace tokenization produces one
-        // giant non-matching phrase. We instead split on common particles and
-        // punctuation, and also extract contiguous CJK / alphanumeric runs as
-        // sub-tokens so partial matches like "日立" work against "日立グループ".
-        const rawTokens = message
-          .toLowerCase()
-          .replace(/[?？。、！!,.・\s]/g, ' ')
-          // Split off Japanese particles so they don't glue nouns together
-          .replace(/(について|における|に関する|に関して|のための|からの|および|または|として|という|といった|こと|もの|ため|など|です|ます|してください|を行う|を行って)/g, ' ')
-          .split(/\s+/)
-          .filter(Boolean);
+        // Ask the LLM to judge which knowledge entries are relevant and what
+        // action to take. This replaces the earlier string/regex keyword
+        // matching which failed for Japanese text and leaked unrelated recent
+        // research into answers. The LLM receives a numbered list of entry
+        // topics + short summaries and returns the indexes of the relevant
+        // ones plus an action: answer / investigate / chat.
+        const MAX_CANDIDATES = 30;
+        // Most recently modified entries first (limit to bound prompt size)
+        const candidates = allKnowledge.slice(-MAX_CANDIDATES);
 
-        const msgKeywords = new Set();
-        for (const tok of rawTokens) {
-          if (tok.length >= 2 && tok.length <= 20) msgKeywords.add(tok);
-          // Extract contiguous Kanji / Katakana / alphanumeric runs as sub-tokens.
-          // Hiragana-only runs are usually particles/verb endings, skip them.
-          const subs = tok.match(/[\u4e00-\u9fff\u30a0-\u30ffA-Za-z0-9]{2,}/g) || [];
-          for (const s of subs) msgKeywords.add(s);
-        }
-        const keywordList = [...msgKeywords];
+        const entryList = candidates.map((k, i) => {
+          const topic = (k.topic || 'unknown').slice(0, 80);
+          const snippet = (k.summary || '').replace(/\s+/g, ' ').slice(0, 120);
+          return `${i}: ${topic}${snippet ? ' — ' + snippet : ''}`;
+        }).join('\n');
 
-        // Score each knowledge entry by relevance to the question
-        const scored = allKnowledge.map(k => {
-          const topic = (k.topic || '').toLowerCase();
-          const summaryText = (k.summary || '').toLowerCase();
-          const insightsText = Array.isArray(k.insights)
-            ? k.insights.map(i => typeof i === 'string' ? i : JSON.stringify(i)).join(' ').toLowerCase()
-            : '';
-
-          let score = 0;
-          for (const kw of keywordList) {
-            if (topic.includes(kw)) score += 3;
-            if (summaryText.includes(kw)) score += 2;
-            if (insightsText.includes(kw)) score += 1;
+        let selectedKnowledge = [];
+        let chatAction = 'answer';
+        if (candidates.length === 0) {
+          chatAction = 'investigate';
+        } else {
+          try {
+            const selectPrompt = fillPrompt('select-chat-knowledge.user', {
+              userMessage: message.slice(0, 500),
+              entryList
+            });
+            const { parsed } = await ollamaClient.queryForJson(
+              selectPrompt,
+              loadPrompt('select-chat-knowledge.system')
+            );
+            if (parsed) {
+              if (parsed.action === 'investigate' || parsed.action === 'chat' || parsed.action === 'answer') {
+                chatAction = parsed.action;
+              }
+              if (Array.isArray(parsed.relevantIndexes)) {
+                const seen = new Set();
+                for (const idx of parsed.relevantIndexes) {
+                  const n = Number(idx);
+                  if (Number.isInteger(n) && n >= 0 && n < candidates.length && !seen.has(n)) {
+                    seen.add(n);
+                    selectedKnowledge.push(candidates[n]);
+                    if (selectedKnowledge.length >= 8) break;
+                  }
+                }
+              }
+              log('debug', `Chat knowledge selector: action=${chatAction}, picked=${selectedKnowledge.length}/${candidates.length}${parsed.reason ? ` (${String(parsed.reason).slice(0, 80)})` : ''}`);
+            } else {
+              log('debug', 'Chat knowledge selector returned no parsed JSON, passing empty knowledge');
+              chatAction = 'investigate';
+            }
+          } catch (e) {
+            log('debug', `Chat knowledge selector failed: ${e.message} — passing empty knowledge`);
+            chatAction = 'investigate';
           }
-          return { entry: k, score };
-        });
-
-        // Only include entries that actually match the question. When nothing
-        // matches, pass empty knowledge — the chat prompt is designed to
-        // honestly say "information is insufficient, starting investigation"
-        // in that case, which is far better than hallucinating from unrelated
-        // recent research (the previous fallback leaked physics/AI content
-        // into Hitachi queries).
-        scored.sort((a, b) => b.score - a.score);
-        const selectedKnowledge = scored.filter(s => s.score > 0).slice(0, 8).map(s => s.entry);
-        if (selectedKnowledge.length === 0) {
-          log('debug', `Chat: no knowledge entries matched keywords [${keywordList.slice(0, 5).join(', ')}]`);
         }
 
         // Format knowledge entries in readable text (not raw JSON)
@@ -1362,28 +1366,18 @@ const startServer = (port) => {
         };
         let knowledgeSummary = selectedKnowledge.map(formatEntry).join('\n\n');
 
-        // Also search knowledge graph for related context
-        if (keywordList.length > 0) {
-          const graphNodes = searchGraphNodes(keywordList);
-          if (graphNodes.length > 0) {
-            const graphContext = graphNodes.map(n => {
-              let line = `- ${n.label}`;
-              if (n.description) line += `: ${n.description.slice(0, 100)}`;
-              if (n.neighbors.length > 0) line += ` (関連: ${n.neighbors.slice(0, 5).join(', ')})`;
-              return line;
-            }).join('\n');
-            knowledgeSummary += '\n\n## ナレッジグラフの関連キーワード:\n' + graphContext;
-          }
-        }
-
         // Immediate response from existing knowledge (research-focused only)
-        log('info', `User chat: ${message.slice(0, 80)}`);
+        log('info', `User chat: ${message.slice(0, 80)} [action=${chatAction}]`);
         saveChatMessage('user', message);
         try {
           // Load recent chat history (excluding the message just saved) for context
           const recentHistory = loadChatHistory().slice(-11, -1); // last 10 messages (5 turns)
+          // When the selector decided "investigate", pass empty knowledge so
+          // the chat LLM honestly declares insufficient information and
+          // cannot hallucinate from unrelated context.
+          const knowledgeForChat = chatAction === 'investigate' ? '' : knowledgeSummary;
           let reply = await chat(ollamaClient, message, {
-            knowledge: knowledgeSummary,
+            knowledge: knowledgeForChat,
             history: recentHistory
           });
           // Strip any file name/path references
