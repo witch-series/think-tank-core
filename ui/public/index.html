@@ -209,6 +209,10 @@
           <div id="graph-detail-close" style="float:right;cursor:pointer;color:#ff5555;font-size:16px;line-height:1;">&times;</div>
           <div id="graph-detail-body"></div>
         </div>
+        <div id="source-detail" style="display:none;position:absolute;right:316px;top:8px;width:360px;max-height:calc(100% - 16px);overflow-y:auto;background:#0d0d16;border:1px solid #bd93f9;border-radius:6px;padding:12px;font-size:12px;z-index:11;box-shadow:0 4px 16px rgba(0,0,0,0.6);">
+          <div id="source-detail-close" style="float:right;cursor:pointer;color:#ff5555;font-size:16px;line-height:1;">&times;</div>
+          <div id="source-detail-body"></div>
+        </div>
         <div style="position:absolute;left:8px;bottom:8px;font-size:11px;color:#666;" id="graph-stats"></div>
       </div>
     </div>
@@ -1898,7 +1902,15 @@
 
       document.getElementById('graph-detail-close').addEventListener('click', function() {
         document.getElementById('graph-detail').style.display = 'none';
+        document.getElementById('source-detail').style.display = 'none';
       });
+
+      document.getElementById('source-detail-close').addEventListener('click', function() {
+        document.getElementById('source-detail').style.display = 'none';
+      });
+      document.getElementById('source-detail').addEventListener('click', function(e) { e.stopPropagation(); });
+      document.getElementById('source-detail').addEventListener('mousedown', function(e) { e.stopPropagation(); });
+      document.getElementById('source-detail').addEventListener('mouseup', function(e) { e.stopPropagation(); });
 
       // Prevent clicks on the detail panel from propagating
       document.getElementById('graph-detail').addEventListener('click', function(e) {
@@ -1924,11 +1936,11 @@
       html += '<div class="gd-stat">初回発見: ' + (n.firstSeen || '-').split('T')[0] + '</div>';
       html += '<div class="gd-stat">最終更新: ' + (n.lastUpdated || '-').split('T')[0] + '</div>';
 
-      // Sources
+      // Sources — clickable: opens a modal with entry summaries & a delete action
       if (Array.isArray(n.sources) && n.sources.length > 0) {
         html += '<div class="gd-section"><h4>Sources (' + n.sources.length + ')</h4>';
         n.sources.forEach(function(url) {
-          html += '<a class="gd-link" href="' + esc(url) + '" target="_blank" rel="noopener">' +
+          html += '<a class="gd-link gd-source-link" href="#" data-source-url="' + esc(url) + '">' +
             esc(url.length > 50 ? url.slice(0, 50) + '...' : url) + '</a>';
         });
         html += '</div>';
@@ -1979,6 +1991,17 @@
         });
       }
 
+      // Bind source link clicks — open source-detail modal
+      var sourceLinks = body.querySelectorAll('.gd-source-link');
+      for (var si = 0; si < sourceLinks.length; si++) {
+        sourceLinks[si].addEventListener('click', function(ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          var sourceUrl = this.getAttribute('data-source-url');
+          showSourceDetail(sourceUrl);
+        });
+      }
+
       // Bind delete
       var deleteBtn = document.getElementById('graph-delete-btn');
       if (deleteBtn) {
@@ -2014,6 +2037,71 @@
           });
         });
       }
+    }
+
+    function showSourceDetail(sourceUrl) {
+      var panel = document.getElementById('source-detail');
+      var body = document.getElementById('source-detail-body');
+      body.innerHTML = '<div style="color:#888">Loading...</div>';
+      panel.style.display = 'block';
+
+      fetch(apiUrl + '/knowledge/by-source?url=' + encodeURIComponent(sourceUrl))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var html = '<h3 style="color:#8be9fd;font-size:13px;margin:0 0 8px;">情報源</h3>';
+          html += '<a href="' + esc(sourceUrl) + '" target="_blank" rel="noopener" style="display:block;color:#6272a4;font-size:11px;word-break:break-all;margin-bottom:10px;">' + esc(sourceUrl) + '</a>';
+
+          var entries = (data && data.entries) || [];
+          if (entries.length === 0) {
+            html += '<div style="color:#888;font-size:11px;">この情報源を参照する調査結果は見つかりませんでした。</div>';
+          } else {
+            html += '<div style="color:#bd93f9;font-size:11px;margin-bottom:6px;">この情報源を参照する調査結果 (' + entries.length + '件)</div>';
+            entries.forEach(function(e) {
+              html += '<div style="border-top:1px solid #333;margin-top:8px;padding-top:8px;">';
+              html += '<div style="color:#f1fa8c;font-size:11px;font-weight:bold;">' + esc(e.topic || '(no topic)') + '</div>';
+              if (e.timestamp) html += '<div style="color:#666;font-size:10px;">' + esc((e.timestamp || '').split('T')[0]) + '</div>';
+              if (e.summary) html += '<div style="color:#ccc;font-size:11px;margin-top:4px;line-height:1.5;">' + esc(e.summary) + '</div>';
+              if (Array.isArray(e.insights) && e.insights.length > 0) {
+                html += '<ul style="color:#aaa;font-size:11px;margin:4px 0 0 14px;padding:0;">';
+                e.insights.slice(0, 8).forEach(function(ins) {
+                  html += '<li style="margin:2px 0;">' + esc(ins) + '</li>';
+                });
+                html += '</ul>';
+              }
+              html += '</div>';
+            });
+          }
+
+          html += '<div style="margin-top:12px;padding-top:8px;border-top:1px solid #333;">';
+          html += '<button id="source-delete-btn" style="background:#4a1a1a;color:#ff5555;border:1px solid #ff5555;padding:6px 16px;cursor:pointer;font-family:inherit;font-size:12px;border-radius:4px;width:100%;">この情報源を削除</button>';
+          html += '</div>';
+
+          body.innerHTML = html;
+
+          var delBtn = document.getElementById('source-delete-btn');
+          if (delBtn) {
+            delBtn.addEventListener('click', function() {
+              if (!confirm('この情報源を削除しますか？\n参照している全ての調査結果とグラフノードからも取り除かれます。')) return;
+              delBtn.disabled = true;
+              delBtn.textContent = '削除中...';
+              fetch(apiUrl + '/knowledge/source/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: sourceUrl })
+              }).then(function(r) { return r.json(); }).then(function(res) {
+                panel.style.display = 'none';
+                fetchGraph();
+              }).catch(function(err) {
+                alert('削除エラー: ' + err.message);
+                delBtn.disabled = false;
+                delBtn.textContent = 'この情報源を削除';
+              });
+            });
+          }
+        })
+        .catch(function(err) {
+          body.innerHTML = '<div style="color:#ff5555">取得エラー: ' + esc(err.message) + '</div>';
+        });
     }
 
     // --- Graph Search ---

@@ -22,7 +22,7 @@ const { parseJsonSafe } = require('./lib/json-parser');
 const { runSetup } = require('./lib/setup');
 const { startWatcher } = require('./lib/watcher');
 const { startCLI } = require('./lib/cli');
-const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect } = require('./core/knowledge-graph');
+const { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect, removeSourceFromGraph } = require('./core/knowledge-graph');
 const { decomposeGoal, getNextSubtask, updateSubtask, evaluateProgress, getGoalSummary } = require('./core/goal-manager');
 const { recordOutcome, getFeedbackSummary, isActionUnreliable } = require('./core/feedback-tracker');
 const { execSync } = require('child_process');
@@ -1495,6 +1495,89 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
         const ok = deleteNode(key);
         log('info', `Graph node delete: ${key} → ${ok ? 'deleted' : 'not found'}`);
         res.end(JSON.stringify({ deleted: ok, key }));
+
+      } else if (method === 'GET' && url.pathname === '/knowledge/by-source') {
+        // Return all knowledge DB entries that reference the given source URL.
+        const sourceUrl = url.searchParams.get('url') || '';
+        if (!sourceUrl) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'url is required' }));
+          return;
+        }
+        const entries = [];
+        const kbDirs = [
+          { dir: path.resolve(ROOT, 'brain', 'research'), src: 'research' },
+          { dir: path.resolve(ROOT, 'brain', 'analysis'), src: 'analysis' }
+        ];
+        for (const { dir, src } of kbDirs) {
+          if (!fs.existsSync(dir)) continue;
+          const files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'));
+          for (const file of files) {
+            const lines = fs.readFileSync(path.join(dir, file), 'utf-8').split('\n').filter(Boolean);
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                if (Array.isArray(entry.sources) && entry.sources.includes(sourceUrl)) {
+                  entries.push({
+                    topic: entry.topic || '',
+                    summary: entry.summary || '',
+                    insights: entry.insights || [],
+                    timestamp: entry.timestamp || '',
+                    category: file.replace('.jsonl', ''),
+                    source: src
+                  });
+                }
+              } catch {}
+            }
+          }
+        }
+        entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+        res.end(JSON.stringify({ url: sourceUrl, entries }));
+
+      } else if (method === 'POST' && url.pathname === '/knowledge/source/delete') {
+        // Strip a source URL from every jsonl entry and every graph node.
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const { url: sourceUrl } = JSON.parse(body || '{}');
+        if (!sourceUrl) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'url is required' }));
+          return;
+        }
+        let entriesUpdated = 0;
+        const kbDirs = [
+          path.resolve(ROOT, 'brain', 'research'),
+          path.resolve(ROOT, 'brain', 'analysis')
+        ];
+        for (const dir of kbDirs) {
+          if (!fs.existsSync(dir)) continue;
+          const files = fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'));
+          for (const file of files) {
+            const fullPath = path.join(dir, file);
+            const lines = fs.readFileSync(fullPath, 'utf-8').split('\n').filter(Boolean);
+            let changed = false;
+            const nextLines = [];
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                if (Array.isArray(entry.sources) && entry.sources.includes(sourceUrl)) {
+                  entry.sources = entry.sources.filter(u => u !== sourceUrl);
+                  changed = true;
+                  entriesUpdated++;
+                }
+                nextLines.push(JSON.stringify(entry));
+              } catch {
+                nextLines.push(line);
+              }
+            }
+            if (changed) {
+              fs.writeFileSync(fullPath, nextLines.join('\n') + '\n', 'utf-8');
+            }
+          }
+        }
+        const nodesTouched = removeSourceFromGraph(sourceUrl);
+        log('info', `Source delete: ${sourceUrl.slice(0, 80)} → ${entriesUpdated} entries, ${nodesTouched} nodes`);
+        res.end(JSON.stringify({ deleted: true, entriesUpdated, nodesTouched }));
 
       } else if (method === 'GET' && url.pathname === '/goals') {
         const summary = getGoalSummary();

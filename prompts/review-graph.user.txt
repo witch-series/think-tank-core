@@ -1,5 +1,8 @@
 最終目標: {{goalPrompt}}
 
+## グラフ全体の状況（この情報を踏まえて、全体の均衡も意識して判定してください）
+{{globalContext}}
+
 以下のキーワードと接続を見直してください。「固有名詞レベルの専門用語」だけが残るようにしてください。
 
 キーワード:
@@ -24,7 +27,7 @@
 指示:
 - 重複キーワード → merge
 - 上記基準を満たさないキーワード → remove で削除
-- カテゴリ未設定または不適切 → categories で設定・修正（既存カテゴリも見直し、誤りがあれば正しいものに上書き。programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）
+- カテゴリ未設定または不適切 → categories で設定・修正（既存カテゴリも見直し、誤りがあれば正しいものに上書き。以下の広いカテゴリから最も適切なものを選ぶ: science（物理・化学・生物・数学・天文）/ technology（ソフトウェア・AI・ハードウェア・通信・ロボット）/ engineering（機械・電気・土木・材料） / medicine（医学・健康・薬学・生理学） / business（経済・金融・経営・マーケティング） / humanities（歴史・哲学・言語・文学・宗教） / arts（音楽・美術・映像・デザイン） / society（政治・法律・社会・文化・教育） / environment（気候・生態・地理・エネルギー） / sports（スポーツ・ゲーム・娯楽） / other。特定分野名ではなく必ずこの広いカテゴリのいずれかに割り当てること）
 - 関連あるのに未接続 → addEdges
 - 関連薄い接続 → removeEdges
 

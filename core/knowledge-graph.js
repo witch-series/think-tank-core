@@ -428,10 +428,28 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
   try {
     let totalMerges = 0, totalAdds = 0, totalRemoves = 0;
 
-    // Split into batches for small models
+    // Build a global snapshot (category distribution + counts) so each batch can
+    // judge categories in light of the whole graph, not just its local slice.
+    const globalCategoryCounts = {};
+    for (const k of keys) {
+      const c = normCategory(graph.nodes[k].category) || '未分類';
+      globalCategoryCounts[c] = (globalCategoryCounts[c] || 0) + 1;
+    }
+    const sortedCats = Object.entries(globalCategoryCounts).sort((a, b) => b[1] - a[1]);
+    const globalContext = `全ノード数: ${keys.length}、全エッジ数: ${graph.edges.length}\n現在のカテゴリ分布: ${sortedCats.map(([c, n]) => `${c}(${n})`).join(', ')}`;
+
+    // Shuffle keys so each batch sees a diverse cross-section of the graph
+    // rather than an alphabetically clustered slice — this helps cross-domain
+    // merges and category rebalancing.
+    const shuffled = keys.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
     const batches = [];
-    for (let i = 0; i < keys.length; i += reviewBatchSize) {
-      batches.push(keys.slice(i, i + reviewBatchSize));
+    for (let i = 0; i < shuffled.length; i += reviewBatchSize) {
+      batches.push(shuffled.slice(i, i + reviewBatchSize));
     }
 
     for (const batchKeys of batches) {
@@ -451,7 +469,7 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
           return `- ${fromLabel} → ${toLabel}: ${e.relation || '関連'} (重み: ${e.weight || 1})`;
         }).join('\n') || 'なし';
 
-      const prompt = fillPrompt('review-graph.user', { nodeList, edgeList, goalPrompt: goalPrompt || 'なし' });
+      const prompt = fillPrompt('review-graph.user', { nodeList, edgeList, globalContext, goalPrompt: goalPrompt || 'なし' });
       const { parsed: result } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
       if (result) {
         const counts = applyReviewResult(result);
@@ -1435,4 +1453,25 @@ const searchGraphNodes = (keywords) => {
   return matched.slice(0, 20);
 };
 
-module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect, searchGraphNodes };
+/**
+ * Remove a source URL from every node's sources array.
+ * Returns the number of nodes that were touched.
+ */
+const removeSourceFromGraph = (sourceUrl) => {
+  if (!sourceUrl) return 0;
+  const graph = loadGraph();
+  let touched = 0;
+  for (const key of Object.keys(graph.nodes)) {
+    const node = graph.nodes[key];
+    if (!Array.isArray(node.sources) || node.sources.length === 0) continue;
+    const next = node.sources.filter(u => u !== sourceUrl);
+    if (next.length !== node.sources.length) {
+      node.sources = next;
+      touched++;
+    }
+  }
+  if (touched > 0) saveGraph(graph);
+  return touched;
+};
+
+module.exports = { updateGraph, reviewGraph, pruneGraph, processUnindexedEntries, getUnderExplored, getSuggestedSearchPairs, strengthenSearchPairConnections, getGraphStats, getGraphData, deleteNode, autoConnect, searchGraphNodes, removeSourceFromGraph };
