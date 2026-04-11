@@ -123,48 +123,64 @@ const sanitizeText = (text) => {
 }
 
 // --- Knowledge helpers ---
+// Per-file parsed-entries cache keyed by path. Invalidated by mtime+size.
+// getNewKnowledge / getAllKnowledge are called on every plan cycle and every
+// /chat request; research.jsonl alone can be hundreds of KB.
+const _knowledgeEntriesCache = new Map(); // filePath -> { mtime, size, entries }
+
+const _loadEntriesCached = (filePath, category) => {
+  let st;
+  try { st = fs.statSync(filePath); } catch { return null; }
+  const cached = _knowledgeEntriesCache.get(filePath);
+  if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) {
+    return cached.entries;
+  }
+  const entries = [];
+  const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
+  for (const line of lines) {
+    if (!line) continue;
+    try {
+      const entry = JSON.parse(line);
+      entry._category = category;
+      entries.push(entry);
+    } catch {}
+  }
+  _knowledgeEntriesCache.set(filePath, { mtime: st.mtimeMs, size: st.size, entries });
+  return entries;
+};
+
+const _listJsonlFiles = (knowledgeDbPath) => {
+  try { return fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
+  catch { return null; }
+};
 
 const getNewKnowledge = (knowledgeDbPath, hours = 24) => {
+  const files = _listJsonlFiles(knowledgeDbPath);
+  if (!files) return [];
   const since = Date.now() - hours * 60 * 60 * 1000;
-  const entries = [];
-
-  let files;
-  try { files = fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
-  catch { return entries; }
-
+  const result = [];
   for (const file of files) {
-    const lines = fs.readFileSync(path.join(knowledgeDbPath, file), 'utf-8').split('\n').filter(Boolean);
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        entry._category = file.replace('.jsonl', '');
-        if (entry.timestamp && new Date(entry.timestamp).getTime() > since) entries.push(entry);
-      } catch {}
+    const entries = _loadEntriesCached(path.join(knowledgeDbPath, file), file.replace('.jsonl', ''));
+    if (!entries) continue;
+    for (const entry of entries) {
+      if (entry.timestamp && new Date(entry.timestamp).getTime() > since) result.push(entry);
     }
   }
-  return entries;
+  return result;
 }
 
 /**
  * Get all knowledge entries from a directory (no time filter).
  */
 const getAllKnowledge = (knowledgeDbPath) => {
-  const entries = [];
-  let files;
-  try { files = fs.readdirSync(knowledgeDbPath).filter(f => f.endsWith('.jsonl')); }
-  catch { return entries; }
-
+  const files = _listJsonlFiles(knowledgeDbPath);
+  if (!files) return [];
+  const result = [];
   for (const file of files) {
-    const lines = fs.readFileSync(path.join(knowledgeDbPath, file), 'utf-8').split('\n').filter(Boolean);
-    for (const line of lines) {
-      try {
-        const entry = JSON.parse(line);
-        entry._category = file.replace('.jsonl', '');
-        entries.push(entry);
-      } catch {}
-    }
+    const entries = _loadEntriesCached(path.join(knowledgeDbPath, file), file.replace('.jsonl', ''));
+    if (entries) result.push(...entries);
   }
-  return entries;
+  return result;
 }
 
 const saveKnowledge = (knowledgeDbPath, category, data) => {

@@ -397,31 +397,34 @@ JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "
   })();
 };
 
-// Count total knowledge entries across research/analysis JSONL files.
-// Results are cached per-file keyed by mtime+size so only changed files are rescanned.
+// Count total knowledge entries and files across research/analysis JSONL.
+// Per-file count cached by mtime+size so only changed files are rescanned.
 const _knowledgeCountCache = new Map(); // filePath -> { mtime, size, count }
-const countKnowledgeEntries = () => {
-  let total = 0;
+const countKnowledgeStats = () => {
+  let entries = 0;
+  let files = 0;
   for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
-    if (!fs.existsSync(kbDir)) continue;
-    const dbFiles = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl'));
+    let dbFiles;
+    try { dbFiles = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl')); } catch { continue; }
+    files += dbFiles.length;
     for (const file of dbFiles) {
       const filePath = path.join(kbDir, file);
       try {
         const st = fs.statSync(filePath);
         const cached = _knowledgeCountCache.get(filePath);
         if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) {
-          total += cached.count;
+          entries += cached.count;
           continue;
         }
         const count = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean).length;
         _knowledgeCountCache.set(filePath, { mtime: st.mtimeMs, size: st.size, count });
-        total += count;
+        entries += count;
       } catch {}
     }
   }
-  return total;
+  return { files, entries };
 };
+const countKnowledgeEntries = () => countKnowledgeStats().entries;
 
 // --- Helper: collect codebase context ---
 const collectContext = () => {
@@ -1178,13 +1181,7 @@ const startServer = (port) => {
 
     try {
       if (method === 'GET' && url.pathname === '/status') {
-        let knowledgeFileCount = 0;
-        for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
-          if (fs.existsSync(kbDir)) {
-            knowledgeFileCount += fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl')).length;
-          }
-        }
-        const knowledgeStats = { files: knowledgeFileCount, entries: countKnowledgeEntries() };
+        const knowledgeStats = countKnowledgeStats();
 
         const lastCommit = await getLastCommit(ROOT);
 

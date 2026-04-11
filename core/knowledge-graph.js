@@ -118,21 +118,40 @@ const hasSources = (node) => {
   return Array.isArray(node.sources) && node.sources.length > 0;
 };
 
+// In-memory graph cache with mtime invalidation.
+// The graph is hot: getGraphStats alone causes 4 loads of a ~1.75 MB JSON.
+// Readers are synchronous (no awaits mid-iteration), so sharing the parsed
+// reference across callers is safe in single-threaded Node.
+let _graphCache = null;
+let _graphCacheMtime = 0;
+
 const loadGraph = () => {
-  return loadJsonFile(GRAPH_PATH, { nodes: {}, edges: [], processedTimestamps: [] });
+  try {
+    const mtime = fs.statSync(GRAPH_PATH).mtimeMs;
+    if (_graphCache && _graphCacheMtime === mtime) return _graphCache;
+    _graphCache = JSON.parse(fs.readFileSync(GRAPH_PATH, 'utf-8'));
+    _graphCacheMtime = mtime;
+    return _graphCache;
+  } catch {
+    if (!_graphCache) _graphCache = { nodes: {}, edges: [], processedTimestamps: [] };
+    return _graphCache;
+  }
 };
 
 const saveGraph = (graph) => {
   ensureDir(path.dirname(GRAPH_PATH));
-  // Write to temp file first, then rename (atomic on most OS)
+  // Write to temp file first, then rename (atomic on most OS).
+  // Compact JSON is ~2x faster to serialize and produces ~2x smaller files
+  // vs. pretty-printing. The graph is internal state, not hand-edited.
   const tmpPath = GRAPH_PATH + '.tmp';
-  const data = JSON.stringify(graph, null, 2);
-  fs.writeFileSync(tmpPath, data, 'utf-8');
-  // Keep one backup
+  fs.writeFileSync(tmpPath, JSON.stringify(graph), 'utf-8');
   try {
     if (fs.existsSync(GRAPH_PATH)) fs.copyFileSync(GRAPH_PATH, GRAPH_PATH + '.bak');
   } catch {}
   fs.renameSync(tmpPath, GRAPH_PATH);
+  // Refresh cache so the next loadGraph hits without re-reading.
+  _graphCache = graph;
+  try { _graphCacheMtime = fs.statSync(GRAPH_PATH).mtimeMs; } catch {}
 };
 
 /**
