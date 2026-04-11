@@ -57,23 +57,18 @@ const loadChatHistory = () => {
   return loadJsonFile(CHAT_HISTORY_PATH, []);
 }
 
-let _chatWriting = false;
+// Serialize chat history writes using a promise chain to prevent interleaved
+// read-modify-write races without setTimeout-based polling.
+let _chatWriteChain = Promise.resolve();
 
 const saveChatMessage = (role, text) => {
-  // Simple guard to prevent interleaved reads/writes
-  if (_chatWriting) {
-    setTimeout(() => saveChatMessage(role, text), 50);
-    return;
-  }
-  _chatWriting = true;
-  try {
+  _chatWriteChain = _chatWriteChain.then(() => {
     const history = loadChatHistory();
     history.push({ role, text, timestamp: new Date().toISOString() });
     while (history.length > MAX_CHAT_HISTORY) history.shift();
     saveJsonFile(CHAT_HISTORY_PATH, history, false);
-  } finally {
-    _chatWriting = false;
-  }
+  }).catch(e => log('warn', `saveChatMessage failed: ${e.message}`));
+  return _chatWriteChain;
 }
 
 // --- Chat Report: buffered batch reporting ---
@@ -156,8 +151,10 @@ const saveCuriosities = (items) => {
 }
 
 const addCuriosity = (topic, source) => {
+  if (!topic || typeof topic !== 'string') return;
   const items = loadCuriosities();
-  const isDupe = items.some(c => !c.explored && c.topic.slice(0, 30) === topic.slice(0, 30));
+  const normalized = topic.trim().toLowerCase();
+  const isDupe = items.some(c => !c.explored && c.topic.trim().toLowerCase() === normalized);
   if (isDupe) return;
   items.push({ topic, source, timestamp: new Date().toISOString(), explored: false });
   saveCuriosities(items);
@@ -182,6 +179,23 @@ const markCuriosityExplored = (topic) => {
     item.exploredAt = new Date().toISOString();
     saveCuriosities(items);
   }
+}
+
+// Record a failed exploration attempt. After MAX_CURIOSITY_RETRIES, mark the
+// curiosity as explored to prevent it from blocking the queue indefinitely.
+const MAX_CURIOSITY_RETRIES = 3;
+const recordCuriosityFailure = (topic) => {
+  const items = loadCuriosities();
+  const item = items.find(c => c.topic === topic && !c.explored);
+  if (!item) return;
+  item.retryCount = (item.retryCount || 0) + 1;
+  if (item.retryCount >= MAX_CURIOSITY_RETRIES) {
+    item.explored = true;
+    item.exploredAt = new Date().toISOString();
+    item.failed = true;
+    log('info', `Curiosity abandoned after ${MAX_CURIOSITY_RETRIES} failures: "${topic.slice(0, 60)}"`);
+  }
+  saveCuriosities(items);
 }
 
 // --- Config ---
@@ -353,8 +367,10 @@ const detectAndStoreCuriosity = (client, userMessage, recentHistory) => {
 };
 
 // --- Helper: supplement chat with background search ---
-const supplementChatWithSearch = (client, userMessage, initialReply, existingKnowledge) => {
-  // Fire-and-forget: check if reply indicates insufficient knowledge, then search
+// When the LLM reply indicates insufficient knowledge, queue a curiosity so the
+// autonomous cycle (which now prioritizes user curiosities) will investigate it.
+// This avoids running a parallel agent loop that duplicates the curiosity system.
+const supplementChatWithSearch = (client, userMessage, initialReply) => {
   (async () => {
     try {
       const checkPrompt = `以下の質問と回答を分析してください。
@@ -367,46 +383,41 @@ const supplementChatWithSearch = (client, userMessage, initialReply, existingKno
 JSON形式で返してください: {"needsSearch": true/false, "searchQuery": "検索クエリ（needsSearchがtrueの場合）"}`;
 
       const response = await client.query(checkPrompt, 'JSONのみ出力してください。');
-      const text = (response.response || '').trim();
-      const parsed = parseJsonSafe(text);
-      if (!parsed) return;
-      if (!parsed.needsSearch || !parsed.searchQuery) return;
+      const parsed = parseJsonSafe((response.response || '').trim());
+      if (!parsed || !parsed.needsSearch || !parsed.searchQuery) return;
 
-      log('info', `Supplementing chat with search: "${parsed.searchQuery.slice(0, 60)}"`);
-
-      // Run a quick research loop
-      const workLogDir = path.resolve(ROOT, 'brain', 'work-logs');
-      const result = await runAgentLoop(client, parsed.searchQuery, ROOT, {
-        workLogDir, onLog: log, mode: 'research',
-        visitedUrls: loadVisitedUrls()
-      });
-
-      if (result.visitedUrls && result.visitedUrls.length > 0) {
-        addVisitedUrls(result.visitedUrls, result.credibilityMap);
-      }
-
-      if (result.empty) return;
-
-      // Save the supplementary research
-      const hasData = !result.empty &&
-                      ((result.insights && result.insights.length > 0) ||
-                       (result.summary && result.summary.length > 10));
-      if (hasData) {
-        saveKnowledge(path.resolve(ROOT, 'brain', 'research'), 'research', {
-          topic: parsed.searchQuery.slice(0, 50),
-          insights: result.insights || [],
-          summary: result.summary || '',
-          sources: result.sources || []
-        });
-        log('info', `Supplementary research saved: ${(result.insights || []).length} insights for user query`);
-
-        // Notify user in chat with context-aware report
-        bufferChatReport(parsed.searchQuery, result);
-      }
+      addCuriosity(parsed.searchQuery, 'user_chat');
+      log('info', `Supplement: queued curiosity for insufficient reply: "${parsed.searchQuery.slice(0, 60)}"`);
     } catch (e) {
       log('debug', `Supplement search failed: ${e.message}`);
     }
   })();
+};
+
+// Count total knowledge entries across research/analysis JSONL files.
+// Results are cached per-file keyed by mtime+size so only changed files are rescanned.
+const _knowledgeCountCache = new Map(); // filePath -> { mtime, size, count }
+const countKnowledgeEntries = () => {
+  let total = 0;
+  for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
+    if (!fs.existsSync(kbDir)) continue;
+    const dbFiles = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl'));
+    for (const file of dbFiles) {
+      const filePath = path.join(kbDir, file);
+      try {
+        const st = fs.statSync(filePath);
+        const cached = _knowledgeCountCache.get(filePath);
+        if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) {
+          total += cached.count;
+          continue;
+        }
+        const count = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean).length;
+        _knowledgeCountCache.set(filePath, { mtime: st.mtimeMs, size: st.size, count });
+        total += count;
+      } catch {}
+    }
+  }
+  return total;
 };
 
 // --- Helper: collect codebase context ---
@@ -446,15 +457,7 @@ const collectContext = () => {
     }
   }
 
-  let knowledgeCount = 0;
-  for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
-    if (fs.existsSync(kbDir)) {
-      const dbFiles = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl'));
-      for (const file of dbFiles) {
-        knowledgeCount += fs.readFileSync(path.join(kbDir, file), 'utf-8').split('\n').filter(Boolean).length;
-      }
-    }
-  }
+  const knowledgeCount = countKnowledgeEntries();
 
   const recentLogs = logs.filter(l => l.level === 'info').slice(-3).map(l => l.message).join('; ');
 
@@ -482,6 +485,18 @@ let lastAnalysisCycle = 0;
 
 const getResearchDbPath = () => { return path.resolve(ROOT, 'brain', 'research'); }
 const getAnalysisDbPath = () => { return path.resolve(ROOT, 'brain', 'analysis'); }
+
+// Auto-connect graph only when it's small enough — large graphs are already
+// well-connected and the scan is expensive.
+const AUTO_CONNECT_NODE_THRESHOLD = 500;
+const maybeAutoConnect = () => {
+  const stats = getGraphStats();
+  if (stats.nodeCount <= AUTO_CONNECT_NODE_THRESHOLD) {
+    autoConnect(log);
+  } else {
+    log('info', `Auto-connect skipped: graph has ${stats.nodeCount} nodes (threshold: ${AUTO_CONNECT_NODE_THRESHOLD})`);
+  }
+};
 
 const gitPull = () => {
   try {
@@ -704,6 +719,9 @@ const scheduleAutonomousTasks = () => {
             setPhase('idle');
             actionReason = 'no data';
             actionResult = result;
+            if (activeCuriosities.length > 0) {
+              recordCuriosityFailure(activeCuriosities[0]);
+            }
             break;
           }
 
@@ -743,10 +761,15 @@ const scheduleAutonomousTasks = () => {
             Promise.all(graphPromises).catch(() => {});
           }
 
-          // Mark user curiosity as explored only after successful research
-          if (activeCuriosities.length > 0 && hasData) {
-            markCuriosityExplored(activeCuriosities[0]);
-            log('info', `Curiosity explored via main research: "${activeCuriosities[0].slice(0, 60)}"`);
+          // Mark user curiosity as explored on success, or record a failure
+          // so persistently failing curiosities eventually get abandoned.
+          if (activeCuriosities.length > 0) {
+            if (hasData) {
+              markCuriosityExplored(activeCuriosities[0]);
+              log('info', `Curiosity explored via main research: "${activeCuriosities[0].slice(0, 60)}"`);
+            } else {
+              recordCuriosityFailure(activeCuriosities[0]);
+            }
           }
 
           actionResult = result;
@@ -838,10 +861,7 @@ const scheduleAutonomousTasks = () => {
           await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
           setPhase('organizing', 'Reviewing knowledge graph');
           await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
-          // Only auto-connect if graph is small — large graphs are already well-connected
-const _acStats = getGraphStats();
-if (_acStats.nodeCount <= 500) autoConnect(log);
-else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (threshold: 500)`);
+          maybeAutoConnect();
 
           actionSuccess = true;
           actionReason = `compressed ${total.length} files`;
@@ -1015,11 +1035,14 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
 
             // Post context-aware curiosity report to chat
             bufferChatReport(curiosity.topic.slice(0, 40), curiosityResult);
+            markCuriosityExplored(curiosity.topic);
+          } else {
+            // No data — count as failed attempt
+            recordCuriosityFailure(curiosity.topic);
           }
-          markCuriosityExplored(curiosity.topic);
         } catch (e) {
           log('debug', `Curiosity exploration failed: ${e.message}`);
-          markCuriosityExplored(curiosity.topic);
+          recordCuriosityFailure(curiosity.topic);
         }
       }
     }
@@ -1144,16 +1167,13 @@ const startServer = (port) => {
 
     try {
       if (method === 'GET' && url.pathname === '/status') {
-        let knowledgeStats = { files: 0, entries: 0 };
+        let knowledgeFileCount = 0;
         for (const kbDir of [path.resolve(ROOT, 'brain', 'research'), path.resolve(ROOT, 'brain', 'analysis')]) {
           if (fs.existsSync(kbDir)) {
-            const files = fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl'));
-            knowledgeStats.files += files.length;
-            for (const file of files) {
-              knowledgeStats.entries += fs.readFileSync(path.join(kbDir, file), 'utf-8').split('\n').filter(Boolean).length;
-            }
+            knowledgeFileCount += fs.readdirSync(kbDir).filter(f => f.endsWith('.jsonl')).length;
           }
         }
+        const knowledgeStats = { files: knowledgeFileCount, entries: countKnowledgeEntries() };
 
         const lastCommit = await getLastCommit(ROOT);
 
@@ -1264,9 +1284,10 @@ const startServer = (port) => {
         const recentAnalysis = getNewKnowledge(path.resolve(ROOT, 'brain', 'analysis'), 72);
         const allKnowledge = [...recentResearch, ...recentAnalysis];
 
-        // Extract keywords from user message for relevance matching
-        const msgLower = message.toLowerCase();
-        const msgKeywords = message.replace(/[?？。、！!,.]/g, ' ').split(/\s+/).filter(w => w.length >= 2);
+        // Extract keywords from user message for relevance matching (deduped, lowercased)
+        const msgKeywords = [...new Set(
+          message.toLowerCase().replace(/[?？。、！!,.]/g, ' ').split(/\s+/).filter(w => w.length >= 2)
+        )];
 
         // Score each knowledge entry by relevance to the question
         const scored = allKnowledge.map(k => {
@@ -1275,14 +1296,12 @@ const startServer = (port) => {
           const insightsText = Array.isArray(k.insights)
             ? k.insights.map(i => typeof i === 'string' ? i : JSON.stringify(i)).join(' ').toLowerCase()
             : '';
-          const fullText = topic + ' ' + summaryText + ' ' + insightsText;
 
           let score = 0;
           for (const kw of msgKeywords) {
-            const kwLower = kw.toLowerCase();
-            if (topic.includes(kwLower)) score += 3;
-            if (summaryText.includes(kwLower)) score += 2;
-            if (insightsText.includes(kwLower)) score += 1;
+            if (topic.includes(kw)) score += 3;
+            if (summaryText.includes(kw)) score += 2;
+            if (insightsText.includes(kw)) score += 1;
           }
           return { entry: k, score };
         });
@@ -1345,8 +1364,8 @@ const startServer = (port) => {
             searchPrompt: config.searchPrompt || ''
           }));
 
-          // Background: if the reply suggests insufficient knowledge, search and follow up
-          supplementChatWithSearch(ollamaClient, message, reply, knowledgeSummary);
+          // Background: if the reply suggests insufficient knowledge, queue a curiosity
+          supplementChatWithSearch(ollamaClient, message, reply);
         } catch (err) {
           res.statusCode = 500;
           res.end(JSON.stringify({ error: err.message }));
@@ -1500,17 +1519,33 @@ else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (t
     }
   });
 
+  // Retry listen on EADDRINUSE — the previous server may still be releasing
+  // the port after a restart. Retry a few times with backoff before giving up.
+  let listenAttempts = 0;
+  const MAX_LISTEN_ATTEMPTS = 10;
+  const tryListen = () => {
+    listenAttempts++;
+    server.listen(port);
+  };
+
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
-      log('warn', `Port ${port} is already in use. API server not started.`);
+      if (listenAttempts < MAX_LISTEN_ATTEMPTS) {
+        log('debug', `Port ${port} busy (attempt ${listenAttempts}/${MAX_LISTEN_ATTEMPTS}), retrying in 500ms`);
+        setTimeout(tryListen, 500);
+      } else {
+        log('warn', `Port ${port} is already in use after ${MAX_LISTEN_ATTEMPTS} attempts. API server not started.`);
+      }
     } else {
       log('error', `API server error: ${err.message}`);
     }
   });
 
-  server.listen(port, () => {
+  server.on('listening', () => {
     log('info', `API server listening on port ${port}`);
   });
+
+  tryListen();
 
   return server;
 };
@@ -1621,10 +1656,7 @@ const start = () => {
       log('info', 'Startup graph prune & review...');
       await pruneGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
       await reviewGraph(ollamaClient, log, { goalPrompt: config.finalGoal || config.searchPrompt });
-      // Only auto-connect if graph is small — large graphs are already well-connected
-const _acStats = getGraphStats();
-if (_acStats.nodeCount <= 500) autoConnect(log);
-else log('info', `Auto-connect skipped: graph has ${_acStats.nodeCount} nodes (threshold: 500)`);
+      maybeAutoConnect();
     }
   }));
 
