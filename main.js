@@ -1292,14 +1292,21 @@ const startServer = (port) => {
         const recentAnalysis = getNewKnowledge(path.resolve(ROOT, 'brain', 'analysis'), 72);
         const allKnowledge = [...recentResearch, ...recentAnalysis];
 
+        // Load chat history early so both the selector and the chat call can
+        // use it for follow-up resolution. The current user message hasn't
+        // been saved yet, so the whole history is "prior turns".
+        const selectorHistory = loadChatHistory().slice(-10);
+        const historyForPrompt = selectorHistory.length > 0
+          ? selectorHistory.map(m =>
+              `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.text.replace(/\s+/g, ' ').slice(0, 200)}`
+            ).join('\n')
+          : '(履歴なし)';
+
         // Ask the LLM to judge which knowledge entries are relevant and what
-        // action to take. This replaces the earlier string/regex keyword
-        // matching which failed for Japanese text and leaked unrelated recent
-        // research into answers. The LLM receives a numbered list of entry
-        // topics + short summaries and returns the indexes of the relevant
-        // ones plus an action: answer / investigate / chat.
+        // action to take. The selector receives the recent conversation so
+        // short follow-ups ("それで?", "続きは?") can be resolved to the
+        // prior topic before matching knowledge entries.
         const MAX_CANDIDATES = 30;
-        // Most recently modified entries first (limit to bound prompt size)
         const candidates = allKnowledge.slice(-MAX_CANDIDATES);
 
         const entryList = candidates.map((k, i) => {
@@ -1316,7 +1323,8 @@ const startServer = (port) => {
           try {
             const selectPrompt = fillPrompt('select-chat-knowledge.user', {
               userMessage: message.slice(0, 500),
-              entryList
+              entryList,
+              chatHistory: historyForPrompt
             });
             const { parsed } = await ollamaClient.queryForJson(
               selectPrompt,
@@ -1339,14 +1347,21 @@ const startServer = (port) => {
               }
               log('debug', `Chat knowledge selector: action=${chatAction}, picked=${selectedKnowledge.length}/${candidates.length}${parsed.reason ? ` (${String(parsed.reason).slice(0, 80)})` : ''}`);
             } else {
-              log('debug', 'Chat knowledge selector returned no parsed JSON, passing empty knowledge');
+              log('debug', 'Chat knowledge selector returned no parsed JSON, assuming investigate');
               chatAction = 'investigate';
             }
           } catch (e) {
-            log('debug', `Chat knowledge selector failed: ${e.message} — passing empty knowledge`);
+            log('debug', `Chat knowledge selector failed: ${e.message} — assuming investigate`);
             chatAction = 'investigate';
           }
         }
+
+        // Check whether a curiosity for this area is already queued so the
+        // reply can tell the user "we're already investigating" instead of
+        // a generic "I'll start investigating".
+        const pendingCuriosities = loadCuriosities()
+          .filter(c => !c.explored && c.source === 'user_chat')
+          .map(c => c.topic);
 
         // Format knowledge entries in readable text (not raw JSON)
         const formatEntry = (k) => {
@@ -1367,12 +1382,21 @@ const startServer = (port) => {
         log('info', `User chat: ${message.slice(0, 80)} [action=${chatAction}]`);
         saveChatMessage('user', message);
         try {
-          // Load recent chat history (excluding the message just saved) for context
-          const recentHistory = loadChatHistory().slice(-11, -1); // last 10 messages (5 turns)
-          // When the selector decided "investigate", pass empty knowledge so
-          // the chat LLM honestly declares insufficient information and
-          // cannot hallucinate from unrelated context.
-          const knowledgeForChat = chatAction === 'investigate' ? '' : knowledgeSummary;
+          // Reuse the history we already loaded for the selector.
+          const recentHistory = selectorHistory;
+          // Always pass whatever knowledge the selector picked. Previously,
+          // action=investigate forced empty knowledge, which left follow-up
+          // questions unanswered because the chat LLM had no context at all.
+          // The selector's job is to filter out unrelated entries, so any
+          // entries it returned are safe to include even on "investigate".
+          let investigationStatus = '';
+          if (chatAction === 'investigate') {
+            const topicHint = (pendingCuriosities[pendingCuriosities.length - 1] || message).slice(0, 80);
+            investigationStatus = pendingCuriosities.length > 0
+              ? `[システム情報] ユーザーの関心「${topicHint}」について既にバックグラウンドで調査中です。この点もユーザーに伝えてください。`
+              : `[システム情報] 関連情報がまだ蓄積されていないため、これから調査を開始します。この点もユーザーに伝えてください。`;
+          }
+          const knowledgeForChat = [knowledgeSummary, investigationStatus].filter(Boolean).join('\n\n');
           let reply = await chat(ollamaClient, message, {
             knowledge: knowledgeForChat,
             history: recentHistory
