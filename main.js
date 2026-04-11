@@ -1295,10 +1295,28 @@ const startServer = (port) => {
         const recentAnalysis = getNewKnowledge(path.resolve(ROOT, 'brain', 'analysis'), 72);
         const allKnowledge = [...recentResearch, ...recentAnalysis];
 
-        // Extract keywords from user message for relevance matching (deduped, lowercased)
-        const msgKeywords = [...new Set(
-          message.toLowerCase().replace(/[?？。、！!,.]/g, ' ').split(/\s+/).filter(w => w.length >= 2)
-        )];
+        // Extract keywords from user message for relevance matching.
+        // Japanese text has no spaces, so whitespace tokenization produces one
+        // giant non-matching phrase. We instead split on common particles and
+        // punctuation, and also extract contiguous CJK / alphanumeric runs as
+        // sub-tokens so partial matches like "日立" work against "日立グループ".
+        const rawTokens = message
+          .toLowerCase()
+          .replace(/[?？。、！!,.・\s]/g, ' ')
+          // Split off Japanese particles so they don't glue nouns together
+          .replace(/(について|における|に関する|に関して|のための|からの|および|または|として|という|といった|こと|もの|ため|など|です|ます|してください|を行う|を行って)/g, ' ')
+          .split(/\s+/)
+          .filter(Boolean);
+
+        const msgKeywords = new Set();
+        for (const tok of rawTokens) {
+          if (tok.length >= 2 && tok.length <= 20) msgKeywords.add(tok);
+          // Extract contiguous Kanji / Katakana / alphanumeric runs as sub-tokens.
+          // Hiragana-only runs are usually particles/verb endings, skip them.
+          const subs = tok.match(/[\u4e00-\u9fff\u30a0-\u30ffA-Za-z0-9]{2,}/g) || [];
+          for (const s of subs) msgKeywords.add(s);
+        }
+        const keywordList = [...msgKeywords];
 
         // Score each knowledge entry by relevance to the question
         const scored = allKnowledge.map(k => {
@@ -1309,7 +1327,7 @@ const startServer = (port) => {
             : '';
 
           let score = 0;
-          for (const kw of msgKeywords) {
+          for (const kw of keywordList) {
             if (topic.includes(kw)) score += 3;
             if (summaryText.includes(kw)) score += 2;
             if (insightsText.includes(kw)) score += 1;
@@ -1317,11 +1335,17 @@ const startServer = (port) => {
           return { entry: k, score };
         });
 
-        // Take relevant entries first, then recent ones as fallback
+        // Only include entries that actually match the question. When nothing
+        // matches, pass empty knowledge — the chat prompt is designed to
+        // honestly say "information is insufficient, starting investigation"
+        // in that case, which is far better than hallucinating from unrelated
+        // recent research (the previous fallback leaked physics/AI content
+        // into Hitachi queries).
         scored.sort((a, b) => b.score - a.score);
-        const relevant = scored.filter(s => s.score > 0).slice(0, 8).map(s => s.entry);
-        const recent = scored.filter(s => s.score === 0).slice(-4).map(s => s.entry);
-        const selectedKnowledge = [...relevant, ...recent];
+        const selectedKnowledge = scored.filter(s => s.score > 0).slice(0, 8).map(s => s.entry);
+        if (selectedKnowledge.length === 0) {
+          log('debug', `Chat: no knowledge entries matched keywords [${keywordList.slice(0, 5).join(', ')}]`);
+        }
 
         // Format knowledge entries in readable text (not raw JSON)
         const formatEntry = (k) => {
@@ -1339,8 +1363,8 @@ const startServer = (port) => {
         let knowledgeSummary = selectedKnowledge.map(formatEntry).join('\n\n');
 
         // Also search knowledge graph for related context
-        if (msgKeywords.length > 0) {
-          const graphNodes = searchGraphNodes(msgKeywords);
+        if (keywordList.length > 0) {
+          const graphNodes = searchGraphNodes(keywordList);
           if (graphNodes.length > 0) {
             const graphContext = graphNodes.map(n => {
               let line = `- ${n.label}`;
