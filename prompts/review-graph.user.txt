@@ -24,7 +24,7 @@
 指示:
 - 重複キーワード → merge
 - 上記基準を満たさないキーワード → remove で削除
-- カテゴリ未設定 → categories で設定（programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）
+- カテゴリ未設定または不適切 → categories で設定・修正（既存カテゴリも見直し、誤りがあれば正しいものに上書き。programming/ai/security/web/database/network/hardware/science/business/devops/mobile/data/design/os/cloud/robotics/nlp/computer_vision/graphics）
 - 関連あるのに未接続 → addEdges
 - 関連薄い接続 → removeEdges
 
