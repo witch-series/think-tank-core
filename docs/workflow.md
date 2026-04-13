@@ -13,6 +13,8 @@ main() → start()
   ├─ TaskManager 初期化（キュー型タスク実行エンジン）
   ├─ Dream Phase スケジュール登録（毎日 dreamHour 時）
   ├─ processUnindexedEntries() → 未処理ナレッジをグラフに反映
+  │    └─ 未処理あり → startup:graph-index タスク
+  │         prune + review + maybeAutoConnect(500ノード以下のみ)
   ├─ scheduleAutonomousTasks() → 自律サイクル開始
   ├─ HTTPサーバー起動（UI + API）
   └─ AnalyzeLoop 開始（コード解析バックグラウンド）
@@ -63,7 +65,8 @@ LLM決定
   │    直近10トピックと重複 → getUnderExplored() で代替トピック
   │
   ├─ 信頼性チェック
-  │    isActionUnreliable() → 直近5回で失敗続き → research にフォールバック
+  │    isActionUnreliable() → 直近N回で失敗続き → research にフォールバック
+  │    (develop/execute: N=10, その他: N=5)
   │
   └─ サブタスク状態更新
        pending → in_progress に変更
@@ -134,7 +137,8 @@ organize
   ├─ compressKnowledge(analysis) → 同上
   ├─ pruneGraph()   → 低品質ノード・エッジ削除
   ├─ reviewGraph()  → LLM がノード関連性を評価、接続提案
-  └─ autoConnect()  → 共通トピック・同カテゴリでエッジ補完
+  └─ maybeAutoConnect()  → 共通トピック・同カテゴリでエッジ補完
+       (ノード数 ≤ 500 の場合のみ実行、超過時はスキップ)
 ```
 
 ### 5.4 generate_script
@@ -335,6 +339,8 @@ TaskManager idle イベント → 次サイクル自動トリガー
 | `/knowledge-graph` | GET | グラフ構造（ノード+エッジ） |
 | `/knowledge-graph/reorganize` | POST | グラフ手動整理 |
 | `/knowledge-graph/delete` | POST | ノード削除 |
+| `/knowledge/by-source` | GET | ソースURLに関連するナレッジ検索 |
+| `/knowledge/source/delete` | POST | ソースURLをナレッジ・グラフから除去 |
 | `/goals` | GET | ゴール + サブタスク進捗 |
 | `/feedback` | GET | アクション成功率統計 |
 | `/curiosities` | GET | 未探索トピック一覧 |
