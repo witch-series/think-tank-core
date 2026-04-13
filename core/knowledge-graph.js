@@ -461,8 +461,8 @@ const _updateGraphInner = async (client, entry) => {
     if (isGenericLabel((kw.keyword || '').trim())) continue;
     // Gate: reject keywords whose description is about a page/site, not actual content
     const desc = (kw.description || '').trim();
-    if (/^(.*サイト|.*ページ|.*ブログ|.*について|.*へのリンク|.*のホームページ|.*のトップページ)$/.test(desc)) continue;
-    if (/^(website|homepage|page about|link to|blog post)[\s.]/i.test(desc)) continue;
+    if (/^.*(のホームページ|のトップページ|へのリンク|の公式サイト|についてのページ|をまとめたサイト|のブログ記事)$/.test(desc)) continue;
+    if (/^(website for|homepage of|page about|link to|blog post about)\s/i.test(desc)) continue;
 
     if (graph.nodes[key]) {
       // Existing node — merge data

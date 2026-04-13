@@ -1401,38 +1401,53 @@ const startServer = (port) => {
               : `[システム情報] 関連情報がまだ蓄積されていないため、これから調査を開始します。この点もユーザーに伝えてください。`;
           }
 
-          // --- Graph command execution ---
+          // --- Graph command execution (async via task manager) ---
           let graphCommandStatus = '';
           if (chatAction === 'graph_command' && chatGraphCommand) {
             const validCommands = ['reorganize', 'prune', 'review'];
             if (validCommands.includes(chatGraphCommand)) {
-              const statsBefore = getGraphStats();
               const cmdLabel = { reorganize: '整理（刈り込み＋レビュー）', prune: '刈り込み', review: 'レビュー' }[chatGraphCommand];
-              log('info', `Chat graph command: ${chatGraphCommand} (nodes=${statsBefore.nodeCount}, edges=${statsBefore.edgeCount})`);
 
-              try {
-                const goalPrompt = config.finalGoal || config.searchPrompt || '';
-                if (chatGraphCommand === 'reorganize' || chatGraphCommand === 'prune') {
-                  await pruneGraph(ollamaClient, log, { goalPrompt });
-                }
-                if (chatGraphCommand === 'reorganize' || chatGraphCommand === 'review') {
-                  await reviewGraph(ollamaClient, log, { goalPrompt });
-                }
-                if (chatGraphCommand === 'reorganize' && statsBefore.nodeCount <= 500) {
-                  autoConnect(log);
-                }
-                const statsAfter = getGraphStats();
-                const nodeDiff = statsAfter.nodeCount - statsBefore.nodeCount;
-                const edgeDiff = statsAfter.edgeCount - statsBefore.edgeCount;
-                graphCommandStatus = `[システム情報] ナレッジグラフの${cmdLabel}が完了しました。結果をユーザーに報告してください。` +
-                  ` 実行前: ${statsBefore.nodeCount}ノード/${statsBefore.edgeCount}エッジ。` +
-                  ` 実行後: ${statsAfter.nodeCount}ノード/${statsAfter.edgeCount}エッジ` +
-                  ` (ノード${nodeDiff >= 0 ? '+' : ''}${nodeDiff}, エッジ${edgeDiff >= 0 ? '+' : ''}${edgeDiff})。` +
-                  ` カテゴリ数: ${statsAfter.categories}。`;
-                log('info', `Chat graph command done: ${statsAfter.nodeCount} nodes, ${statsAfter.edgeCount} edges (delta: nodes=${nodeDiff}, edges=${edgeDiff})`);
-              } catch (e) {
-                log('error', `Chat graph command failed: ${e.message}`);
-                graphCommandStatus = `[システム情報] ナレッジグラフの${cmdLabel}を試みましたが、エラーが発生しました: ${e.message}。この旨をユーザーに伝えてください。`;
+              // Check if a graph task is already running
+              const isGraphRunning = taskManager.currentTask?.name === 'chat:graph-command' ||
+                taskManager.currentTask?.name === 'manual:graph-reorg' ||
+                taskManager.queue.some(t => t.name === 'chat:graph-command' || t.name === 'manual:graph-reorg');
+
+              if (isGraphRunning) {
+                graphCommandStatus = `[システム情報] ナレッジグラフの操作は既にバックグラウンドで実行中です。完了までお待ちください、とユーザーに伝えてください。`;
+              } else {
+                const statsBefore = getGraphStats();
+                log('info', `Chat graph command: ${chatGraphCommand} (nodes=${statsBefore.nodeCount}, edges=${statsBefore.edgeCount})`);
+
+                // Queue the graph operation as a prioritized task (non-blocking)
+                taskManager.prioritize(createTask('chat:graph-command', async () => {
+                  try {
+                    const goalPrompt = config.finalGoal || config.searchPrompt || '';
+                    if (chatGraphCommand === 'reorganize' || chatGraphCommand === 'prune') {
+                      setPhase('organizing', 'Pruning knowledge graph (chat)');
+                      await pruneGraph(ollamaClient, log, { goalPrompt });
+                    }
+                    if (chatGraphCommand === 'reorganize' || chatGraphCommand === 'review') {
+                      setPhase('organizing', 'Reviewing knowledge graph (chat)');
+                      await reviewGraph(ollamaClient, log, { goalPrompt });
+                    }
+                    if (chatGraphCommand === 'reorganize' && statsBefore.nodeCount <= 500) {
+                      autoConnect(log);
+                    }
+                    const statsAfter = getGraphStats();
+                    const nodeDiff = statsAfter.nodeCount - statsBefore.nodeCount;
+                    const edgeDiff = statsAfter.edgeCount - statsBefore.edgeCount;
+                    log('info', `Chat graph command done: ${statsAfter.nodeCount} nodes, ${statsAfter.edgeCount} edges (delta: nodes=${nodeDiff}, edges=${edgeDiff})`);
+                  } catch (e) {
+                    log('error', `Chat graph command failed: ${e.message}`);
+                  } finally {
+                    setPhase('idle');
+                  }
+                }));
+
+                graphCommandStatus = `[システム情報] ナレッジグラフの${cmdLabel}をバックグラウンドで開始しました。` +
+                  ` 現在の状態: ${statsBefore.nodeCount}ノード/${statsBefore.edgeCount}エッジ、カテゴリ数${statsBefore.categories}。` +
+                  ` 処理には時間がかかるため、バックグラウンドで実行中であることをユーザーに伝えてください。完了するとグラフが自動的に更新されます。`;
               }
             }
           }
