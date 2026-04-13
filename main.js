@@ -1318,46 +1318,45 @@ const startServer = (port) => {
         let selectedKnowledge = [];
         let chatAction = 'answer';
         let chatGraphCommand = '';
-        if (candidates.length === 0) {
-          chatAction = 'investigate';
-        } else {
-          try {
-            const selectPrompt = fillPrompt('select-chat-knowledge.user', {
-              userMessage: message.slice(0, 500),
-              entryList,
-              chatHistory: historyForPrompt
-            });
-            const { parsed } = await ollamaClient.queryForJson(
-              selectPrompt,
-              loadPrompt('select-chat-knowledge.system')
-            );
-            if (parsed) {
-              if (parsed.action === 'investigate' || parsed.action === 'chat' || parsed.action === 'answer' || parsed.action === 'graph_command') {
-                chatAction = parsed.action;
-              }
-              if (parsed.action === 'graph_command' && parsed.graphCommand) {
-                chatGraphCommand = parsed.graphCommand;
-              }
-              if (Array.isArray(parsed.relevantIndexes)) {
-                const seen = new Set();
-                for (const idx of parsed.relevantIndexes) {
-                  const n = Number(idx);
-                  if (Number.isInteger(n) && n >= 0 && n < candidates.length && !seen.has(n)) {
-                    seen.add(n);
-                    selectedKnowledge.push(candidates[n]);
-                    if (selectedKnowledge.length >= 8) break;
-                  }
+        // Always run the selector LLM so it can detect graph_command even
+        // when no knowledge candidates exist. An empty entryList is fine —
+        // the selector will return action=investigate or graph_command.
+        try {
+          const selectPrompt = fillPrompt('select-chat-knowledge.user', {
+            userMessage: message.slice(0, 500),
+            entryList: entryList || '(なし)',
+            chatHistory: historyForPrompt
+          });
+          const { parsed } = await ollamaClient.queryForJson(
+            selectPrompt,
+            loadPrompt('select-chat-knowledge.system')
+          );
+          if (parsed) {
+            if (parsed.action === 'investigate' || parsed.action === 'chat' || parsed.action === 'answer' || parsed.action === 'graph_command') {
+              chatAction = parsed.action;
+            }
+            if (parsed.action === 'graph_command' && parsed.graphCommand) {
+              chatGraphCommand = parsed.graphCommand;
+            }
+            if (Array.isArray(parsed.relevantIndexes)) {
+              const seen = new Set();
+              for (const idx of parsed.relevantIndexes) {
+                const n = Number(idx);
+                if (Number.isInteger(n) && n >= 0 && n < candidates.length && !seen.has(n)) {
+                  seen.add(n);
+                  selectedKnowledge.push(candidates[n]);
+                  if (selectedKnowledge.length >= 8) break;
                 }
               }
-              log('debug', `Chat knowledge selector: action=${chatAction}, picked=${selectedKnowledge.length}/${candidates.length}${parsed.reason ? ` (${String(parsed.reason).slice(0, 80)})` : ''}${chatGraphCommand ? ` graphCmd=${chatGraphCommand}` : ''}`);
-            } else {
-              log('debug', 'Chat knowledge selector returned no parsed JSON, assuming investigate');
-              chatAction = 'investigate';
             }
-          } catch (e) {
-            log('debug', `Chat knowledge selector failed: ${e.message} — assuming investigate`);
-            chatAction = 'investigate';
+            log('debug', `Chat knowledge selector: action=${chatAction}, picked=${selectedKnowledge.length}/${candidates.length}${parsed.reason ? ` (${String(parsed.reason).slice(0, 80)})` : ''}${chatGraphCommand ? ` graphCmd=${chatGraphCommand}` : ''}`);
+          } else {
+            log('debug', 'Chat knowledge selector returned no parsed JSON, assuming investigate');
+            chatAction = candidates.length === 0 ? 'investigate' : 'answer';
           }
+        } catch (e) {
+          log('debug', `Chat knowledge selector failed: ${e.message} — assuming investigate`);
+          chatAction = candidates.length === 0 ? 'investigate' : 'answer';
         }
 
         // Check whether a curiosity for this area is already queued so the

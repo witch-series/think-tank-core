@@ -89,10 +89,17 @@ runAgentLoop(mode: 'research')
   │
   ├─ summarizeFindings()
   │    └─ LLM が要約 + インサイト抽出
+  │         ソース品質判定: 見出しのみ/ホームページ概要は LLM が除外
+  │
+  ├─ ソースURL品質フィルタ
+  │    ├─ credibility=0 のソースを除外
+  │    ├─ コンテンツ未取得（paywall/JS限定）のURLを除外
+  │    └─ ホームページ（サイトルート）のURLを除外
   │
   ├─ saveKnowledge() → brain/research/*.jsonl
   │
   ├─ updateGraph() → キーワード抽出 + エッジ生成
+  │    └─ ソースURLを filterSources() で品質フィルタしてからノードに登録
   │
   └─ postChatReport() → チャットに調査報告を投稿
 ```
@@ -209,20 +216,46 @@ evaluateProgress()        → 5サイクルごとに失敗タスクを再評価
 
 調査結果からキーワードを抽出し、関連性のグラフを構築する。
 
+### 品質管理
+
+グラフの品質は **LLMによる判定** と **構造的フィルタ** の2層で管理される。
+
+LLM判定（プロンプトで制御）:
+- ソース品質: 記事本文に基づくか、見出し/サイト説明だけかを LLM が判定
+- キーワード関連性: トピックと無関係なキーワードを LLM が除外
+- description品質: サイト紹介ではなく技術そのものの説明かを LLM が判定
+
+構造的フィルタ（コードで制御）:
+- `isLowQualitySource()`: ホームページURL、低信頼度（credibility<0.2）、ブロック対象を除外
+- `filterSources()`: ノードに登録するソースURLを品質フィルタ
+- `isGenericLabel()`: 汎用語辞書による機械的フィルタ
+
+### グラフ操作
+
 ```
 updateGraph(entry)
+  ├─ filterSources() でソースURL品質フィルタ
   ├─ LLM がキーワード抽出（extract-keywords.user プロンプト）
+  │    ├─ ソース品質チェック（見出しのみ/ホームページ → 抽出スキップ）
+  │    ├─ トピック関連性チェック（無関係キーワード → 除外）
+  │    └─ description品質チェック（サイト説明 → 除外）
   ├─ 汎用ワードフィルター（isGenericLabel）
   ├─ ノード作成/更新（count, sources, topics, category）
+  │    └─ 既存ノードのソースも filterSources() で再フィルタ
   ├─ LLM 抽出の relations からエッジ生成
   └─ 同一リサーチ内キーワード間の自動エッジ
        (小規模グラフ: count>=1, 大規模: count>=3)
 
 reviewGraph()
-  ├─ LLM がノード関連性を評価
-  ├─ エッジ追加提案
-  ├─ 重複概念のマージ
-  └─ 低関連ノードの削除
+  ├─ ラベル伝播でカテゴリ自動補完
+  ├─ コミュニティベースのバッチ分割
+  ├─ LLM がバッチごとにノード関連性を評価
+  │    ├─ 重複概念のマージ（DSU による一括適用）
+  │    ├─ カテゴリ修正
+  │    ├─ エッジ追加/削除提案
+  │    └─ サイト説明/見出しのみキーワードの削除
+  ├─ 全ノードのソースURL洗浄（filterSources）
+  └─ 低関連ノードの削除（ソース付きノードは保護）
 
 pruneGraph()
   ├─ ファジーマッチで明らかな重複をマージ
@@ -256,13 +289,25 @@ Dream Phase
 ## 10. チャット（ユーザー対話）
 
 チャットは調査結果に基づく議論専用。システム内部の話題には応答しない。
+グラフの操作指示にも対応する。
 
 ```
 POST /chat
   ├─ 直近72hのナレッジを読み込み
-  ├─ ユーザーメッセージのキーワードで関連エントリをスコアリング
-  │    関連度高い上位8件 + 最新4件を選択
-  ├─ ナレッジグラフから関連キーワードを検索
+  ├─ LLM がアクション判定（select-chat-knowledge プロンプト）
+  │    ├─ answer     → 関連エントリで回答
+  │    ├─ investigate → 情報不足、調査開始
+  │    ├─ chat        → 雑談応答
+  │    └─ graph_command → グラフ操作実行
+  │         ├─ reorganize → prune + review + autoConnect
+  │         ├─ prune      → 重複統合のみ
+  │         └─ review     → カテゴリ/接続修正のみ
+  │
+  ├─ graph_command の場合:
+  │    ├─ 既存グラフタスク実行中チェック（重複防止）
+  │    ├─ taskManager.prioritize() で非同期実行
+  │    └─ 開始報告をチャットコンテキストに注入
+  │
   ├─ chat() → LLM が知識コンテキスト付きで応答
   ├─ detectAndStoreCuriosity() → 調査意図を自動検出
   └─ supplementChatWithSearch() → 知識不足なら自動調査開始
