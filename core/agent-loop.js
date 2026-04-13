@@ -816,15 +816,12 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
     return { summary: '', insights: [], empty: true };
   }
 
-  // Prioritize actual page content over search result metadata (links).
-  // Filter out sources with very short content (< 200 chars) — these are likely
-  // headline-only or homepage fetches that didn't produce real article body.
+  // Prioritize actual page content over search result metadata (links)
+  // Sort: fetched pages first, then arxiv/github content, search result listings last.
+  // Source quality judgment (headline-only, shallow content) is delegated to the LLM
+  // via the summarize-findings prompt rather than filtering by content length here.
   const contentPriority = { web_page: 0, arxiv_page: 0, github_page: 0, code_analysis: 1, git_history: 1, arxiv_papers: 2, github_repos: 2, search_results: 3 };
-  const substantive = collectedData.filter(d => {
-    if (d.type === 'search_results') return true; // always include search listings (truncated later)
-    return d.content && d.content.length >= 200;
-  });
-  const sorted = [...substantive].sort((a, b) =>
+  const sorted = [...collectedData].sort((a, b) =>
     (contentPriority[a.type] ?? 1) - (contentPriority[b.type] ?? 1)
   );
 

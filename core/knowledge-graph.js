@@ -453,16 +453,14 @@ const _updateGraphInner = async (client, entry) => {
   const entrySources = qualitySources;
   let newNodesAdded = 0;
 
-  // Update nodes — filter out generic keywords and low-quality entries before insertion
+  // Update nodes — filter out generic keywords before insertion
+  // NOTE: Content quality checks (site descriptions, irrelevant keywords) are
+  // handled by the LLM in the extract-keywords prompt, not by regex here.
   for (const kw of keywords) {
     const key = normalizeKey(kw.keyword);
     if (!key) continue;
     // Gate: reject generic/junk keywords at insertion time
     if (isGenericLabel((kw.keyword || '').trim())) continue;
-    // Gate: reject keywords whose description is about a page/site, not actual content
-    const desc = (kw.description || '').trim();
-    if (/^.*(のホームページ|のトップページ|へのリンク|の公式サイト|についてのページ|をまとめたサイト|のブログ記事)$/.test(desc)) continue;
-    if (/^(website for|homepage of|page about|link to|blog post about)\s/i.test(desc)) continue;
 
     if (graph.nodes[key]) {
       // Existing node — merge data
