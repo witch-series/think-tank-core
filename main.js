@@ -565,6 +565,7 @@ const scheduleAutonomousTasks = () => {
 
     if (goalText && goalText !== 'なし') {
       try {
+        setPhase('planning', 'Evaluating goal progress');
         // Run decomposition and evaluation in parallel when both are needed
         const goalPromises = [
           decomposeGoal(ollamaClient, goalText, {
