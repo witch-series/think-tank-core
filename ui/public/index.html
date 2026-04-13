@@ -1925,6 +1925,9 @@
     }
 
     function showGraphDetail(gn) {
+      // Close the source-detail modal when selecting a different node
+      document.getElementById('source-detail').style.display = 'none';
+
       var n = gn.node;
       var panel = document.getElementById('graph-detail');
       var body = document.getElementById('graph-detail-body');

@@ -816,10 +816,15 @@ const summarizeFindings = async (client, taskDescription, collectedData, onLog) 
     return { summary: '', insights: [], empty: true };
   }
 
-  // Prioritize actual page content over search result metadata (links)
-  // Sort: fetched pages first, then arxiv/github content, search result listings last
+  // Prioritize actual page content over search result metadata (links).
+  // Filter out sources with very short content (< 200 chars) — these are likely
+  // headline-only or homepage fetches that didn't produce real article body.
   const contentPriority = { web_page: 0, arxiv_page: 0, github_page: 0, code_analysis: 1, git_history: 1, arxiv_papers: 2, github_repos: 2, search_results: 3 };
-  const sorted = [...collectedData].sort((a, b) =>
+  const substantive = collectedData.filter(d => {
+    if (d.type === 'search_results') return true; // always include search listings (truncated later)
+    return d.content && d.content.length >= 200;
+  });
+  const sorted = [...substantive].sort((a, b) =>
     (contentPriority[a.type] ?? 1) - (contentPriority[b.type] ?? 1)
   );
 
@@ -965,12 +970,25 @@ const runAgentLoop = async (client, taskDescription, repoPath, options = {}) => 
     onLog('info', `Summary complete: ${insights.length} insights`);
   }
 
-  // Extract source URLs from collected data
+  // Extract source URLs from collected data, filtering out low-quality sources:
+  // - Sources with no actual content (empty fetch = headline-only or paywall)
+  // - Homepage / site-root URLs (no article content)
+  // - Sources with zero credibility (blocked platforms)
   const sourceUrls = [];
   for (const d of collectedData) {
-    if (d.url) { sourceUrls.push(d.url); continue; }
-    const urlMatch = (d.source || '').match(/https?:\/\/[^\s)]+/);
-    if (urlMatch) sourceUrls.push(urlMatch[0]);
+    // Skip sources that had no fetchable content (headline-only / paywall / JS-only)
+    if (d.credibility === 0) continue;
+    if (d.url && (!d.content || d.content.length === 0)) continue;
+
+    // Skip homepage / site-root URLs
+    const url = d.url || ((d.source || '').match(/https?:\/\/[^\s)]+/) || [])[0];
+    if (url) {
+      try {
+        const segments = new URL(url).pathname.split('/').filter(Boolean);
+        if (segments.length === 0) continue; // site root
+      } catch {}
+      sourceUrls.push(url);
+    }
   }
 
   // Build credibility map from collected data

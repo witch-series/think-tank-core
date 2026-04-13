@@ -1317,6 +1317,7 @@ const startServer = (port) => {
 
         let selectedKnowledge = [];
         let chatAction = 'answer';
+        let chatGraphCommand = '';
         if (candidates.length === 0) {
           chatAction = 'investigate';
         } else {
@@ -1331,8 +1332,11 @@ const startServer = (port) => {
               loadPrompt('select-chat-knowledge.system')
             );
             if (parsed) {
-              if (parsed.action === 'investigate' || parsed.action === 'chat' || parsed.action === 'answer') {
+              if (parsed.action === 'investigate' || parsed.action === 'chat' || parsed.action === 'answer' || parsed.action === 'graph_command') {
                 chatAction = parsed.action;
+              }
+              if (parsed.action === 'graph_command' && parsed.graphCommand) {
+                chatGraphCommand = parsed.graphCommand;
               }
               if (Array.isArray(parsed.relevantIndexes)) {
                 const seen = new Set();
@@ -1345,7 +1349,7 @@ const startServer = (port) => {
                   }
                 }
               }
-              log('debug', `Chat knowledge selector: action=${chatAction}, picked=${selectedKnowledge.length}/${candidates.length}${parsed.reason ? ` (${String(parsed.reason).slice(0, 80)})` : ''}`);
+              log('debug', `Chat knowledge selector: action=${chatAction}, picked=${selectedKnowledge.length}/${candidates.length}${parsed.reason ? ` (${String(parsed.reason).slice(0, 80)})` : ''}${chatGraphCommand ? ` graphCmd=${chatGraphCommand}` : ''}`);
             } else {
               log('debug', 'Chat knowledge selector returned no parsed JSON, assuming investigate');
               chatAction = 'investigate';
@@ -1396,7 +1400,44 @@ const startServer = (port) => {
               ? `[システム情報] ユーザーの関心「${topicHint}」について既にバックグラウンドで調査中です。この点もユーザーに伝えてください。`
               : `[システム情報] 関連情報がまだ蓄積されていないため、これから調査を開始します。この点もユーザーに伝えてください。`;
           }
-          const knowledgeForChat = [knowledgeSummary, investigationStatus].filter(Boolean).join('\n\n');
+
+          // --- Graph command execution ---
+          let graphCommandStatus = '';
+          if (chatAction === 'graph_command' && chatGraphCommand) {
+            const validCommands = ['reorganize', 'prune', 'review'];
+            if (validCommands.includes(chatGraphCommand)) {
+              const statsBefore = getGraphStats();
+              const cmdLabel = { reorganize: '整理（刈り込み＋レビュー）', prune: '刈り込み', review: 'レビュー' }[chatGraphCommand];
+              log('info', `Chat graph command: ${chatGraphCommand} (nodes=${statsBefore.nodeCount}, edges=${statsBefore.edgeCount})`);
+
+              try {
+                const goalPrompt = config.finalGoal || config.searchPrompt || '';
+                if (chatGraphCommand === 'reorganize' || chatGraphCommand === 'prune') {
+                  await pruneGraph(ollamaClient, log, { goalPrompt });
+                }
+                if (chatGraphCommand === 'reorganize' || chatGraphCommand === 'review') {
+                  await reviewGraph(ollamaClient, log, { goalPrompt });
+                }
+                if (chatGraphCommand === 'reorganize' && statsBefore.nodeCount <= 500) {
+                  autoConnect(log);
+                }
+                const statsAfter = getGraphStats();
+                const nodeDiff = statsAfter.nodeCount - statsBefore.nodeCount;
+                const edgeDiff = statsAfter.edgeCount - statsBefore.edgeCount;
+                graphCommandStatus = `[システム情報] ナレッジグラフの${cmdLabel}が完了しました。結果をユーザーに報告してください。` +
+                  ` 実行前: ${statsBefore.nodeCount}ノード/${statsBefore.edgeCount}エッジ。` +
+                  ` 実行後: ${statsAfter.nodeCount}ノード/${statsAfter.edgeCount}エッジ` +
+                  ` (ノード${nodeDiff >= 0 ? '+' : ''}${nodeDiff}, エッジ${edgeDiff >= 0 ? '+' : ''}${edgeDiff})。` +
+                  ` カテゴリ数: ${statsAfter.categories}。`;
+                log('info', `Chat graph command done: ${statsAfter.nodeCount} nodes, ${statsAfter.edgeCount} edges (delta: nodes=${nodeDiff}, edges=${edgeDiff})`);
+              } catch (e) {
+                log('error', `Chat graph command failed: ${e.message}`);
+                graphCommandStatus = `[システム情報] ナレッジグラフの${cmdLabel}を試みましたが、エラーが発生しました: ${e.message}。この旨をユーザーに伝えてください。`;
+              }
+            }
+          }
+
+          const knowledgeForChat = [knowledgeSummary, investigationStatus, graphCommandStatus].filter(Boolean).join('\n\n');
           let reply = await chat(ollamaClient, message, {
             knowledge: knowledgeForChat,
             history: recentHistory

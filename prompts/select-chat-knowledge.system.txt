@@ -14,7 +14,17 @@
 
 - 関連エントリが1件以上見つかる → action: "answer"（既存の知識で回答可能）
 - 関連エントリが0件 → action: "investigate"（情報不足、調査が必要）
-- 質問が雑談・あいさつ・システム操作指示の場合 → action: "chat"（知識不要、そのまま会話）
+- 質問が雑談・あいさつの場合 → action: "chat"（知識不要、そのまま会話）
+- ナレッジグラフの操作指示の場合 → action: "graph_command"（グラフ操作を実行）
+
+## グラフ操作の判定
+
+ユーザーがナレッジグラフ（知識グラフ）に対する操作を指示している場合、action を "graph_command" にしてください。graphCommand フィールドに実行すべき操作を指定します。
+
+対応する操作:
+- "reorganize" — グラフの整理・再構成（重複統合、カテゴリ修正、不要ノード削除）。「グラフを整理して」「ナレッジグラフを更新して」「重複を整理して」「グラフをきれいにして」等
+- "prune" — グラフの刈り込みのみ（重複・類似キーワードの統合）。「重複をまとめて」「似たキーワードを統合して」等
+- "review" — グラフのレビューのみ（カテゴリ修正、不要ノード削除、接続修正）。「カテゴリを見直して」「不要なキーワー��を消して」等
 
 ## 出力形式
 
@@ -22,4 +32,5 @@
 
 {"relevantIndexes": [0, 3, 5], "action": "answer", "reason": "理由を一文で"}
 
-relevantIndexes はエントリ番号の配列（0始まり）。action は "answer" | "investigate" | "chat" のいずれか。
+relevantIndexes はエントリ番号の配列（0始まり）。action は "answer" | "investigate" | "chat" | "graph_command" のいずれか。
+graph_command の場合は graphCommand フィー���ドも追加: {"relevantIndexes": [], "action": "graph_command", "graphCommand": "reorganize", "reason": "理由"}

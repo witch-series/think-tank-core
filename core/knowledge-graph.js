@@ -6,6 +6,7 @@ const { fillPrompt } = require('../lib/prompt-loader');
 const { parseJsonSafe } = require('../lib/json-parser');
 const { getModelConfig } = require('../lib/model-config');
 const { loadJsonFile, ensureDir } = require('../lib/file-utils');
+const { classifySource } = require('../explorers/searcher');
 
 const GRAPH_PATH = path.join(__dirname, '..', 'brain', 'knowledge-graph.json');
 
@@ -111,6 +112,50 @@ const isGenericLabel = (label) => {
 };
 
 /**
+ * Check if a source URL is low-quality (homepage, shallow page, or low credibility).
+ * Returns true if the source should be EXCLUDED from the graph.
+ */
+const isLowQualitySource = (url) => {
+  if (!url || typeof url !== 'string') return true;
+  // Not a URL at all (e.g. search query strings, labels)
+  if (!/^https?:\/\//.test(url)) return false; // non-URL source labels are OK
+
+  try {
+    const parsed = new URL(url);
+    const segments = parsed.pathname.split('/').filter(Boolean);
+
+    // Homepage / site root — no article content
+    if (segments.length === 0) return true;
+
+    // Shallow category/tag/about pages
+    if (segments.length === 1 && /^(tag|tags|category|categories|about|contact|privacy|terms|login|signup|search|archive|sitemap|feed|rss)$/i.test(segments[0])) return true;
+
+    // Search engine result pages (not actual content)
+    if (/duckduckgo\.com|google\.com\/search|bing\.com\/search|search\.yahoo/.test(url)) return true;
+  } catch {
+    return true;
+  }
+
+  // Check credibility via classifySource
+  const { credibility, type } = classifySource(url);
+  if (type === 'blocked') return true;
+  if (credibility < 0.2) return true;
+
+  return false;
+};
+
+/**
+ * Filter an array of source URLs, keeping only quality sources.
+ * Limits output to maxSources to prevent bloat.
+ */
+const filterSources = (sources, maxSources = 20) => {
+  if (!Array.isArray(sources)) return [];
+  return sources
+    .filter(s => !isLowQualitySource(s))
+    .slice(0, maxSources);
+};
+
+/**
  * Check if a node still has information sources backing it.
  * Nodes with sources should be protected from deletion.
  */
@@ -213,7 +258,7 @@ const applyDsuMerges = (graph, mergePairs, onLog) => {
       collapsed++;
     }
     dst.count = countSum;
-    dst.sources = [...srcSetAll].slice(0, 20);
+    dst.sources = filterSources([...srcSetAll]);
     dst.topics = [...topicSetAll].slice(0, 10);
     if (bestDesc) dst.description = bestDesc;
     dst.lastUpdated = new Date().toISOString();
@@ -381,6 +426,9 @@ const _updateGraphInner = async (client, entry) => {
 
   if (!summary && !insights) return graph;
 
+  // --- Source quality gate: filter out low-quality sources before processing ---
+  const qualitySources = filterSources(entry.sources);
+
   const prompt = fillPrompt('extract-keywords.user', { topic, summary, insights, sources });
 
   let keywords = [];
@@ -402,15 +450,19 @@ const _updateGraphInner = async (client, entry) => {
   }
 
   const now = new Date().toISOString();
-  const entrySources = Array.isArray(entry.sources) ? entry.sources : [];
+  const entrySources = qualitySources;
   let newNodesAdded = 0;
 
-  // Update nodes — filter out generic keywords before insertion
+  // Update nodes — filter out generic keywords and low-quality entries before insertion
   for (const kw of keywords) {
     const key = normalizeKey(kw.keyword);
     if (!key) continue;
     // Gate: reject generic/junk keywords at insertion time
     if (isGenericLabel((kw.keyword || '').trim())) continue;
+    // Gate: reject keywords whose description is about a page/site, not actual content
+    const desc = (kw.description || '').trim();
+    if (/^(.*サイト|.*ページ|.*ブログ|.*について|.*へのリンク|.*のホームページ|.*のトップページ)$/.test(desc)) continue;
+    if (/^(website|homepage|page about|link to|blog post)[\s.]/i.test(desc)) continue;
 
     if (graph.nodes[key]) {
       // Existing node — merge data
@@ -426,8 +478,8 @@ const _updateGraphInner = async (client, entry) => {
       if (kw.category && !node.category) {
         node.category = kw.category;
       }
-      // Add new sources
-      const srcSet = new Set(node.sources || []);
+      // Add new sources (re-filter existing sources to clean up legacy junk)
+      const srcSet = new Set(filterSources(node.sources));
       for (const s of entrySources) srcSet.add(s);
       node.sources = [...srcSet].slice(0, 20);
       // Track related topics
@@ -565,8 +617,12 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
     const pendingCategories = {};      // key -> category
     const pendingAddEdges = [];        // { from, to, relation }
     const pendingRemoveEdges = new Set(); // sorted pair keys
+    let llmEmptyBatches = 0;
+    let llmKeyMisses = 0;
+    let batchIndex = 0;
 
     for (const batchKeys of batches) {
+      batchIndex++;
       const nodeList = batchKeys.map(k => {
         const n = graph.nodes[k];
         if (!n) return null;
@@ -581,7 +637,9 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
       for (const k of batchKeys) {
         const neighbors = adj.get(k) || [];
         for (const n of neighbors) {
-          if (!batchKeySet.has(n) && !batchKeySet.has(k)) continue;
+          // Only show edges where both endpoints are in this batch — edges
+          // pointing outside would reference labels the LLM cannot judge.
+          if (!batchKeySet.has(n)) continue;
           const pair = k < n ? k + '|' + n : n + '|' + k;
           if (seenEdgePairs.has(pair)) continue;
           seenEdgePairs.add(pair);
@@ -593,38 +651,65 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
       const edgeList = edgeLines.length > 0 ? edgeLines.join('\n') : 'なし';
 
       const prompt = fillPrompt('review-graph.user', { nodeList, edgeList, globalContext, goalPrompt: goalPrompt || 'なし' });
-      const { parsed: result } = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
-      if (!result) continue;
+      let result = null;
+      let rawText = '';
+      try {
+        const resp = await client.queryForJson(prompt, 'JSONのみ出力してください。', queryOpts);
+        result = resp.parsed;
+        rawText = resp.response || '';
+      } catch (qe) {
+        if (onLog) onLog('warn', `Review batch ${batchIndex} LLM call failed: ${qe.message}`);
+        continue;
+      }
+      if (!result) {
+        llmEmptyBatches++;
+        if (onLog) onLog('warn', `Review batch ${batchIndex}/${batches.length} (${batchKeys.length} nodes): LLM returned no parseable JSON. Raw: ${(rawText || '').slice(0, 160)}`);
+        continue;
+      }
 
+      let batchMerges = 0, batchRemoves = 0, batchCats = 0, batchAddEdges = 0, batchRemoveEdges = 0;
       for (const m of (Array.isArray(result.merge) ? result.merge : [])) {
         const fromKey = normalizeKey(m.from);
         const intoKey = normalizeKey(m.into);
-        if (fromKey && intoKey && fromKey !== intoKey) {
-          pendingMerges.push([fromKey, intoKey]);
-        }
+        if (!fromKey || !intoKey || fromKey === intoKey) continue;
+        if (!graph.nodes[fromKey] || !graph.nodes[intoKey]) { llmKeyMisses++; continue; }
+        pendingMerges.push([fromKey, intoKey]);
+        batchMerges++;
       }
       for (const [label, category] of Object.entries(result.categories || {})) {
         const key = normalizeKey(label);
-        if (key) pendingCategories[key] = category;
+        if (!key) continue;
+        if (!graph.nodes[key]) { llmKeyMisses++; continue; }
+        pendingCategories[key] = category;
+        batchCats++;
       }
       for (const e of (Array.isArray(result.addEdges) ? result.addEdges : [])) {
         const fromKey = normalizeKey(e.from);
         const toKey = normalizeKey(e.to);
-        if (fromKey && toKey && fromKey !== toKey) {
-          pendingAddEdges.push({ from: fromKey, to: toKey, relation: e.relation || '' });
-        }
+        if (!fromKey || !toKey || fromKey === toKey) continue;
+        if (!graph.nodes[fromKey] || !graph.nodes[toKey]) { llmKeyMisses++; continue; }
+        pendingAddEdges.push({ from: fromKey, to: toKey, relation: e.relation || '' });
+        batchAddEdges++;
       }
       for (const label of (Array.isArray(result.remove) ? result.remove : [])) {
         const key = normalizeKey(label);
-        if (key) pendingRemoves.add(key);
+        if (!key) continue;
+        if (!graph.nodes[key]) { llmKeyMisses++; continue; }
+        pendingRemoves.add(key);
+        batchRemoves++;
       }
       for (const e of (Array.isArray(result.removeEdges) ? result.removeEdges : [])) {
         const fromKey = normalizeKey(e.from);
         const toKey = normalizeKey(e.to);
-        if (fromKey && toKey) {
-          pendingRemoveEdges.add(fromKey < toKey ? fromKey + '|' + toKey : toKey + '|' + fromKey);
-        }
+        if (!fromKey || !toKey) continue;
+        pendingRemoveEdges.add(fromKey < toKey ? fromKey + '|' + toKey : toKey + '|' + fromKey);
+        batchRemoveEdges++;
       }
+      if (onLog) onLog('debug', `Review batch ${batchIndex}/${batches.length}: merge=${batchMerges} remove=${batchRemoves} cat=${batchCats} +e=${batchAddEdges} -e=${batchRemoveEdges}`);
+    }
+
+    if (onLog) {
+      onLog('info', `Review LLM totals: merges=${pendingMerges.length}, removes=${pendingRemoves.size}, cats=${Object.keys(pendingCategories).length}, +edges=${pendingAddEdges.length}, -edges=${pendingRemoveEdges.size} (empty batches=${llmEmptyBatches}, key misses=${llmKeyMisses})`);
     }
 
     // --- Apply accumulated operations ---------------------------------
@@ -680,12 +765,25 @@ const _reviewGraphInner = async (client, onLog, options = {}) => {
       edgesRemoved = before - graph.edges.length;
     }
 
+    // 6) Clean up low-quality sources from all nodes (homepage URLs, blocked, etc.)
+    let sourcesCleaned = 0;
+    for (const k of Object.keys(graph.nodes)) {
+      const node = graph.nodes[k];
+      if (!Array.isArray(node.sources) || node.sources.length === 0) continue;
+      const before = node.sources.length;
+      node.sources = filterSources(node.sources);
+      if (node.sources.length < before) sourcesCleaned += (before - node.sources.length);
+    }
+    if (sourcesCleaned > 0 && onLog) {
+      onLog('info', `Source cleanup: removed ${sourcesCleaned} low-quality source URLs from nodes`);
+    }
+
     saveGraph(graph);
 
     const newKeys = Object.keys(graph.nodes);
     if (onLog) onLog('info', `Graph review done: ${newKeys.length} nodes, ${graph.edges.length} edges (merged ${mergedCount}, removed ${removedCount} nodes, +${addedCount} edges, -${edgesRemoved} edges, categorized ${categoriesUpdated})`);
   } catch (e) {
-    if (onLog) onLog('debug', `Graph review failed: ${e.message}`);
+    if (onLog) onLog('error', `Graph review failed: ${e.message}\n${e.stack || ''}`);
   }
 
   return graph;
@@ -1045,7 +1143,7 @@ const _pruneGraphInner = async (client, onLog, options = {}) => {
     const dst = graph.nodes[keeper];
     dst.count = (dst.count || 1) + (src.count || 1);
     const srcSet = new Set([...(dst.sources || []), ...(src.sources || [])]);
-    dst.sources = [...srcSet].slice(0, 20);
+    dst.sources = filterSources([...srcSet]);
     const topicSet = new Set([...(dst.topics || []), ...(src.topics || [])]);
     dst.topics = [...topicSet].slice(0, 10);
     if (src.description && src.description.length > (dst.description || '').length) {
@@ -1340,7 +1438,7 @@ const _pruneGraphInner = async (client, onLog, options = {}) => {
           collectPruneResult(parsed);
         }
       } catch (e) {
-        if (onLog) onLog('debug', `Prune round ${round} batch failed: ${e.message}`);
+        if (onLog) onLog('warn', `Prune round ${round} batch failed: ${e.message}`);
       }
     }
 
